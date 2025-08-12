@@ -3,3 +3,5 @@ numpy
 beautifulsoup4==4.13.4
 supabase
 jupyter
+python-dotenv
+tqdm
