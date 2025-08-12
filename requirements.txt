@@ -5,3 +5,4 @@ supabase
 jupyter
 python-dotenv
 tqdm
+rich
