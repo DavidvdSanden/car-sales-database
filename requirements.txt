@@ -6,3 +6,9 @@ jupyter
 python-dotenv
 tqdm
 rich
+geopandas
+matplotlib
+plotly
+descartes
+pgeocode
+openpyxl
