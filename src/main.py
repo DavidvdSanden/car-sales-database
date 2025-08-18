@@ -9,11 +9,23 @@ import os
 from dotenv import load_dotenv
 from rich.console import Console
 from rich.progress import Progress, BarColumn, TextColumn, TimeRemainingColumn
+from datetime import datetime
+import re
+
+
+def is_valid_format(s, pattern):
+    return bool(re.fullmatch(pattern, s))
 
 
 def main():
+    # Get current date and time
+    now = datetime.now()
+
+    # Format it as YYYY-MM-DD_HH-MM-SS
+    timestamp = now.strftime("%Y-%m-%d_%H-%M-%S")
+
     # The level is set to INFO, so all messages from INFO and above will be recorded.
-    logging.basicConfig(filename='../logging/script_log.log', level=logging.INFO,
+    logging.basicConfig(filename=f"../logging/script_log_{timestamp}.log", level=logging.INFO,
                         format='%(asctime)s - %(levelname)s - %(message)s')
     logging.info('Script started.')
 
@@ -25,7 +37,7 @@ def main():
     supabase_key = os.getenv("SUPABASE_KEY")
 
     supabase: Client = create_client(supabase_url, supabase_key)
-    table_name = "scraped_data"
+    table_name = "autoscout_car_adverts"
 
     try:
         response = supabase.table(table_name).select("*").limit(1).execute()
@@ -74,6 +86,7 @@ def main():
     response = supabase.table(table_name).select("car_id").execute()
     car_ids_in_database = {d['car_id'] for d in response.data}
     logging.info(f"Found {len(car_ids_in_database)} existing car IDs.")
+    pattern = r'^\d{4}[A-Z]{2}$'
 
     # Initialize a rich Console object
     console = Console()
@@ -126,20 +139,32 @@ def main():
                         break
 
                     for car in car_listings:
-                        # Your data extraction logic here
-                        try:
-                            data_mileage = float(car.get("data-mileage"))
-                        except (ValueError, TypeError):
-                            data_mileage = -1
-
-                        try:
-                            listing_price = float(car.get("data-price"))
-                        except (ValueError, TypeError):
-                            listing_price = -1
 
                         # Check if car is already in database
                         car_id = car.get("id")
                         if car_id not in car_ids_in_database:
+
+                            # Extract correct mileage
+                            try:
+                                data_mileage = float(car.get("data-mileage"))
+                            except (ValueError, TypeError):
+                                data_mileage = -1
+
+                            # Extract correct listing price
+                            try:
+                                listing_price = float(car.get("data-price"))
+                            except (ValueError, TypeError):
+                                listing_price = -1
+
+                            # Extract postcode
+                            raw_postcode = car.get("data-listing-zip-code")
+                            try:
+                                postcode = raw_postcode[0:4] + raw_postcode[-2:].upper()
+                                if not is_valid_format(postcode, pattern):
+                                    postcode = None
+                            except:
+                                postcode = None
+
                             car_info = {
                                 "car_id": car_id,
                                 "make": car.get("data-make"),
@@ -147,13 +172,15 @@ def main():
                                 "first_registration": car.get("data-first-registration"),
                                 "fuel_type": car.get("data-fuel-type"),
                                 "mileage": data_mileage,
-                                "post_code": car.get("data-listing-zip-code"),
+                                "post_code_raw": raw_postcode,
+                                "post_code": postcode,
                                 "listing_price": listing_price,
                             }
                             cars_to_insert.append(car_info)
                             car_ids_in_database.add(car_id)
 
                             if len(cars_to_insert) >= batch_size:
+                                console.log(f"Inserting {len(cars_to_insert)} cars to the database...")
                                 logging.info(f"Inserting {len(cars_to_insert)} cars to the database...")
                                 supabase.table(table_name).insert(cars_to_insert).execute()
                                 count_added += len(cars_to_insert)
@@ -206,6 +233,10 @@ def main():
                 .in_("id", chunk)
                 .execute()
             )
+
+    # Latitude / longitude information
+    # logging.info('Calculating latitude and longitude for missing fields.')
+    #  TO DO: add lat/lon calcs
 
     # Script finished
     logging.info('Script finished successfully.')
