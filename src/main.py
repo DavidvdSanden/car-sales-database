@@ -98,124 +98,93 @@ def main():
     logging.info(f"Found {len(car_ids_in_database)} existing car IDs.")
     pattern = r'^\d{4}[A-Z]{2}$'
 
-    # Initialize a rich Console object
-    console = Console()
+    # Main loops over price range
+    for k, price in enumerate(price_vec[:-1]):
+        params['pricefrom'] = round(price_vec[k])
+        params['priceto'] = round(price_vec[k + 1])
+        logging.info(f"Evaluating price range {params['pricefrom']}-{params['priceto']}.")
 
-    # --- Main Loops ---
-    # Custom Progress display
-    with Progress(
-            TextColumn("[progress.description]{task.description}"),
-            BarColumn(),
-            TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
-            TimeRemainingColumn(),
-            console=console
-    ) as progress:
-        # Outer loop over price range
-        task_price = progress.add_task(
-            "[green]Processing price ranges...", total=len(price_vec[:-1] - 1)
-        )
+        # Refresh all cars in database
+        if k % refresh_rate_cars_in_database == 0:
+            response = supabase.table(table_name).select("car_id").execute()
+            car_ids_in_database = {d['car_id'] for d in response.data}
 
-        for k, price in enumerate(price_vec[:-1]):
-            params['pricefrom'] = round(price_vec[k])
-            params['priceto'] = round(price_vec[k + 1])
-            logging.info(f"Evaluating price range {params['pricefrom']}-{params['priceto']}.")
+        # Middle loop over mileage range
+        for j, km in enumerate(km_vec[:-1]):
+            params['kmfrom'] = round(km_vec[j])
+            params['kmto'] = round(km_vec[j + 1])
 
-            if k % refresh_rate_cars_in_database == 0:
-                response = supabase.table(table_name).select("car_id").execute()
-                car_ids_in_database = {d['car_id'] for d in response.data}
+            # Flag to check if the page loop completes fully
+            page_limit_reached = True
 
-            # Inner loop over mileage
-            task_mileage = progress.add_task(
-                f"[cyan]  Processing mileage {round(km_vec[0])}-{round(km_vec[-1])}...",
-                total=len(km_vec[:-1] - 1)
-            )
+            # Innermost loop over pages
+            for i in range(page_limit_autoscout):
+                params['page'] = i + 1
+                html = requests.get(base_url, params=params).text
+                soup = BeautifulSoup(html, "html.parser")
+                car_listings = soup.find_all("article", class_="cldt-summary-full-item")
 
-            for j, km in enumerate(km_vec[:-1]):
-                params['kmfrom'] = round(km_vec[j])
-                params['kmto'] = round(km_vec[j + 1])
+                # If no listings are found, the loop breaks early.
+                if not car_listings:
+                    page_limit_reached = False
+                    break
 
-                # Flag to check if the page loop completes fully
-                page_limit_reached = True
+                # Loop over all extracted cars
+                for car in car_listings:
 
-                # Innermost loop over pages
-                for i in range(page_limit_autoscout):
-                    params['page'] = i + 1
-                    html = requests.get(base_url, params=params).text
-                    soup = BeautifulSoup(html, "html.parser")
-                    car_listings = soup.find_all("article", class_="cldt-summary-full-item")
+                    # Check if car is already in database
+                    car_id = car.get("id")
+                    if car_id not in car_ids_in_database:
 
-                    if not car_listings:
-                        # If no listings are found, the loop breaks early.
-                        page_limit_reached = False
-                        break
+                        # Extract correct mileage
+                        try:
+                            data_mileage = float(car.get("data-mileage"))
+                        except (ValueError, TypeError):
+                            data_mileage = -1
 
-                    for car in car_listings:
+                        # Extract correct listing price
+                        try:
+                            listing_price = float(car.get("data-price"))
+                        except (ValueError, TypeError):
+                            listing_price = -1
 
-                        # Check if car is already in database
-                        car_id = car.get("id")
-                        if car_id not in car_ids_in_database:
-
-                            # Extract correct mileage
-                            try:
-                                data_mileage = float(car.get("data-mileage"))
-                            except (ValueError, TypeError):
-                                data_mileage = -1
-
-                            # Extract correct listing price
-                            try:
-                                listing_price = float(car.get("data-price"))
-                            except (ValueError, TypeError):
-                                listing_price = -1
-
-                            # Extract postcode
-                            raw_postcode = car.get("data-listing-zip-code")
-                            try:
-                                postcode = raw_postcode[0:4] + raw_postcode[-2:].upper()
-                                if not is_valid_format(postcode, pattern):
-                                    postcode = None
-                            except:
+                        # Extract postcode
+                        raw_postcode = car.get("data-listing-zip-code")
+                        try:
+                            postcode = raw_postcode[0:4] + raw_postcode[-2:].upper()
+                            if not is_valid_format(postcode, pattern):
                                 postcode = None
+                        except:
+                            postcode = None
 
-                            car_info = {
-                                "car_id": car_id,
-                                "make": car.get("data-make"),
-                                "model": car.get("data-model"),
-                                "first_registration": car.get("data-first-registration"),
-                                "fuel_type": car.get("data-fuel-type"),
-                                "mileage": data_mileage,
-                                "post_code_raw": raw_postcode,
-                                "post_code": postcode,
-                                "listing_price": listing_price,
-                            }
-                            cars_to_insert.append(car_info)
-                            car_ids_in_database.add(car_id)
+                        car_info = {
+                            "car_id": car_id,
+                            "make": car.get("data-make"),
+                            "model": car.get("data-model"),
+                            "first_registration": car.get("data-first-registration"),
+                            "fuel_type": car.get("data-fuel-type"),
+                            "mileage": data_mileage,
+                            "post_code_raw": raw_postcode,
+                            "post_code": postcode,
+                            "listing_price": listing_price,
+                        }
+                        cars_to_insert.append(car_info)
+                        car_ids_in_database.add(car_id)
 
-                            if len(cars_to_insert) >= batch_size:
-                                console.log(f"Inserting {len(cars_to_insert)} cars to the database...")
-                                logging.info(f"Inserting {len(cars_to_insert)} cars to the database...")
-                                supabase.table(table_name).insert(cars_to_insert).execute()
-                                count_added += len(cars_to_insert)
-                                cars_to_insert = []
+                        # Update database in batches
+                        if len(cars_to_insert) >= batch_size:
+                            logging.info(f"Inserting {len(cars_to_insert)} cars to the database...")
+                            supabase.table(table_name).insert(cars_to_insert).execute()
+                            count_added += len(cars_to_insert)
+                            cars_to_insert = []
 
-                    time.sleep(0.01)
+                time.sleep(0.01)
 
-                # Check and log if the page limit was reached for this mileage-price combination
-                if page_limit_reached:
-                    logging.info(
-                        f"Reached page limit for price: {params['pricefrom']}-{params['priceto']} and mileage: "
-                        f"{params['kmfrom']}-{params['kmto']}")
-
-                # Update the mileage task for each mileage range
-                progress.update(task_mileage, advance=1)
-
-            # Mark the mileage task as complete and remove it
-            progress.remove_task(task_mileage)
-
-            # Update the price task for each price range
-            progress.update(task_price, advance=1)
-
-        # Mark the price task as complete and remove it
-        progress.remove_task(task_price)
+            # Check and log if the page limit was reached for this mileage-price combination
+            if page_limit_reached:
+                logging.info(
+                    f"Reached page limit for price: {params['pricefrom']}-{params['priceto']} and mileage: "
+                    f"{params['kmfrom']}-{params['kmto']}")
 
     # Insert any remaining cars after all loops have finished
     if cars_to_insert:
@@ -245,9 +214,9 @@ def main():
                 .execute()
             )
 
-    # Latitude / longitude information
+    # Retrieve postcode information
     # logging.info('Calculating latitude and longitude for missing fields.')
-    #  TO DO: add lat/lon calcs
+    #  TO DO: add retrieve any missing postcode information
 
     # Script finished
     logging.info('Script finished successfully.')
