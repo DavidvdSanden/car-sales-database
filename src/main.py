@@ -108,6 +108,7 @@ def main():
         for k, price in enumerate(price_vec[:-1]):
             params['pricefrom'] = round(price_vec[k])
             params['priceto'] = round(price_vec[k + 1])
+            logging.info(f"Evaluating price range {params['pricefrom']}-{params['priceto']}.")
 
             if k % refresh_rate_cars_in_database == 0:
                 response = supabase.table(table_name).select("car_id").execute()
