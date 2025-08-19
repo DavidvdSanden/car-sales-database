@@ -7,10 +7,10 @@ import time
 import logging
 import os
 from dotenv import load_dotenv
-from rich.console import Console
-from rich.progress import Progress, BarColumn, TextColumn, TimeRemainingColumn
 from datetime import datetime
 import re
+import subprocess
+import sys
 
 
 def is_valid_format(s, pattern):
@@ -28,6 +28,16 @@ def main():
     logging.basicConfig(filename=f"../logging/script_log_{timestamp}.log", level=logging.INFO,
                         format='%(asctime)s - %(levelname)s - %(message)s')
     logging.info('Script started.')
+
+    # Enable VPN
+    command = r'cd "C:\Program Files\NordVPN" && nordvpn -c -g "Netherlands"'
+    result = subprocess.run(command, shell=True, capture_output=True, text=True)
+    time.sleep(1)
+    if result.returncode == 0:
+        logging.info(f"Successful connection created with VPN.")
+    else:
+        logging.info(f"Unsuccessful connection with VPN. Return code is {result.returncode}")
+        sys.exit()
 
     # Load variables from .env into the environment
     load_dotenv()
