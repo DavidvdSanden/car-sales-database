@@ -32,12 +32,15 @@ def main():
     # Enable VPN
     command = r'cd "C:\Program Files\NordVPN" && nordvpn -c -g "Netherlands"'
     result = subprocess.run(command, shell=True, capture_output=True, text=True)
-    time.sleep(1)
+    time.sleep(5)
     if result.returncode == 0:
         logging.info(f"Successful connection created with VPN.")
     else:
         logging.info(f"Unsuccessful connection with VPN. Return code is {result.returncode}")
         sys.exit()
+
+    # Process all adverts
+    is_processing_all = 1
 
     # Load variables from .env into the environment
     load_dotenv()
@@ -88,6 +91,7 @@ def main():
 
     count_added = 0
     cars_to_insert = []
+    car_ids_in_upsert = set()
     batch_size = 500
     page_limit_autoscout = 20
     refresh_rate_cars_in_database = 10
@@ -102,7 +106,9 @@ def main():
     for k, price in enumerate(price_vec[:-1]):
         params['pricefrom'] = round(price_vec[k])
         params['priceto'] = round(price_vec[k + 1])
-        logging.info(f"Evaluating price range {params['pricefrom']}-{params['priceto']}.")
+        logging.info(
+            f"Evaluating price range {params['pricefrom']}-{params['priceto']}. "
+            f"Approx {round(k / np.shape(price_vec)[0] * 100, 2)}%")
 
         # Refresh all cars in database
         if k % refresh_rate_cars_in_database == 0:
@@ -134,7 +140,7 @@ def main():
 
                     # Check if car is already in database
                     car_id = car.get("id")
-                    if car_id not in car_ids_in_database:
+                    if car_id not in car_ids_in_upsert and ((car_id not in car_ids_in_database) or is_processing_all):
 
                         # Extract correct mileage
                         try:
@@ -157,6 +163,43 @@ def main():
                         except:
                             postcode = None
 
+                        # Extract the desired details by their data-testid attributes
+                        transmission = car.find("span", {"data-testid": "VehicleDetails-transmission"})
+                        fuel = car.find("span", {"data-testid": "VehicleDetails-gas_pump"})
+                        power = car.find("span", {"data-testid": "VehicleDetails-speedometer"})
+
+                        # Get the text values, stripping whitespace
+                        transmission_text = transmission.get_text(strip=True) if transmission else None
+                        fuel_text = fuel.get_text(strip=True) if fuel else None
+                        power_text = power.get_text(strip=True) if power else None
+
+                        kw_value = None
+                        pk_value = None
+
+                        if power_text:
+                            # Extract numbers: first one before 'kW', second inside parentheses
+                            match = re.search(r"(\d+)\s*kW.*\((\d+)\s*PK\)", power_text)
+                            if match:
+                                kw_value = float(match.group(1))
+                                pk_value = float(match.group(2))
+
+                        # Find car and model specifics
+                        title_element = car.find("span", class_="ListItem_title_bold__iQJRq")
+                        model_text = title_element.get_text(strip=True) if title_element else None
+                        version_element = car.find("span", class_="ListItem_version__5EWfi")
+                        version_text = version_element.get_text(strip=True) if version_element else None
+
+                        # Find the actieradius span by aria-label
+                        actieradius_element = car.find("span", attrs={"aria-label": "actieradius"})
+                        actieradius_text = actieradius_element.get_text(strip=True) if actieradius_element else None
+
+                        # Extract both numeric values as floats
+                        ranges = [float(num) for num in
+                                  re.findall(r"\d+(?:\.\d+)?", actieradius_text)] if actieradius_text else []
+
+                        general_range = ranges[0] if len(ranges) > 0 else None
+                        urban_range = ranges[1] if len(ranges) > 1 else None
+
                         car_info = {
                             "car_id": car_id,
                             "make": car.get("data-make"),
@@ -167,16 +210,28 @@ def main():
                             "post_code_raw": raw_postcode,
                             "post_code": postcode,
                             "listing_price": listing_price,
+                            "transmission": transmission_text,
+                            "fuel_text": fuel_text,
+                            "power_text": power_text,
+                            "power_kw": kw_value,
+                            "power_pk": pk_value,
+                            "model_text": model_text,
+                            "model_type": version_text,
+                            "range_raw": actieradius_text,
+                            "range_general": general_range,
+                            "range_urban": urban_range
                         }
                         cars_to_insert.append(car_info)
                         car_ids_in_database.add(car_id)
+                        car_ids_in_upsert.add(car_id)
 
                         # Update database in batches
                         if len(cars_to_insert) >= batch_size:
                             logging.info(f"Inserting {len(cars_to_insert)} cars to the database...")
-                            supabase.table(table_name).insert(cars_to_insert).execute()
+                            supabase.table(table_name).upsert(cars_to_insert, ignore_duplicates=True).execute()
                             count_added += len(cars_to_insert)
                             cars_to_insert = []
+                            car_ids_in_upsert = set()
 
                 time.sleep(0.01)
 
@@ -189,7 +244,7 @@ def main():
     # Insert any remaining cars after all loops have finished
     if cars_to_insert:
         logging.info(f"Inserting final {len(cars_to_insert)} cars to the database.")
-        supabase.table(table_name).insert(cars_to_insert).execute()
+        supabase.table(table_name).upsert(cars_to_insert).execute()
         count_added += len(cars_to_insert)
 
     logging.info(f"\nTotal cars added to the database: {count_added}")
