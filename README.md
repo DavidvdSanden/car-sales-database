@@ -1,11 +1,12 @@
 # AutoScout24 Scraper
 
-This project contains a Python script that scrapes car advertisements from [AutoScout24.nl](https://www.autoscout24.nl), processes the data, and stores it in a Supabase database. The script systematically iterates through price and mileage ranges, collects data, and removes duplicates.
+This project contains a data pipeline that collects car advertisements from [AutoScout24.nl](https://www.autoscout24.nl), processes the data, and stores it in a Supabase database. The data is linked to a PowerBI dashboard displaying information such as vehicle make, model, location, price, etc.
+
+<img width="1277" height="720" alt="image" src="https://github.com/user-attachments/assets/71b89f08-a89f-436e-b7d9-b7b01f6575da" />
 
 ## Features
 
 * **Data Scraping:** Iterates through price and mileage ranges, fetching and parsing:
-
   * Price
   * Mileage
   * Postal code
@@ -14,11 +15,12 @@ This project contains a Python script that scrapes car advertisements from [Auto
   * Power (kW & HP)
   * Model & version
   * Range (if available)
+    
 * **Database Integration:**
-
   * Connects to Supabase using `SUPABASE_URL` and `SUPABASE_KEY` from `.env`
   * Upserts (inserts or updates) new ads
   * Removes duplicates based on `car_id`
+    
 * **Logging:** All steps and warnings are logged in a timestamped log file.
 * **VPN Connection (Optional):** Automatically connects to NordVPN (Netherlands server) before scraping starts.
 
@@ -27,7 +29,7 @@ This project contains a Python script that scrapes car advertisements from [Auto
 ### Software
 
 * Python 3.9+
-* NordVPN CLI installed and properly configured
+* NordVPN CLI installed and properly configured (Optional)
 
 ### Python Packages
 
@@ -81,12 +83,13 @@ You can modify the following parameters in the code:
 
 ## Dashboard
 
-<img width="1277" height="720" alt="image" src="https://github.com/user-attachments/assets/71b89f08-a89f-436e-b7d9-b7b01f6575da" />
+* **General overview**:
+* **Location**:
+* **Price trends**:
 
 
 ## Future Improvements
 
-* Convert postal codes to GPS coordinates
 * Add more robust error handling for network issues
 * Implement parallel scraping to improve speed
 
