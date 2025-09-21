@@ -4,7 +4,6 @@ This project contains a Python script that scrapes car advertisements from [Auto
 
 ## Features
 
-* **VPN Connection:** Automatically connects to NordVPN (Netherlands server) before scraping starts.
 * **Data Scraping:** Iterates through price and mileage ranges, fetching and parsing:
 
   * Price
@@ -21,6 +20,7 @@ This project contains a Python script that scrapes car advertisements from [Auto
   * Upserts (inserts or updates) new ads
   * Removes duplicates based on `car_id`
 * **Logging:** All steps and warnings are logged in a timestamped log file.
+* **VPN Connection (Optional):** Automatically connects to NordVPN (Netherlands server) before scraping starts.
 
 ## Requirements
 
