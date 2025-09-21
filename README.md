@@ -79,6 +79,11 @@ You can modify the following parameters in the code:
 * **`batch_size`**: batch size for database upserts
 * **`refresh_rate_cars_in_database`**: how often existing car IDs are refreshed
 
+## Dashboard
+
+<img width="1277" height="720" alt="image" src="https://github.com/user-attachments/assets/71b89f08-a89f-436e-b7d9-b7b01f6575da" />
+
+
 ## Future Improvements
 
 * Convert postal codes to GPS coordinates
