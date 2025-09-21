@@ -13,6 +13,10 @@ import subprocess
 import sys
 
 
+USE_VPN = 0
+PROCESS_ALL = 1
+
+
 def is_valid_format(s, pattern):
     return bool(re.fullmatch(pattern, s))
 
@@ -30,17 +34,21 @@ def main():
     logging.info('Script started.')
 
     # Enable VPN
-    command = r'cd "C:\Program Files\NordVPN" && nordvpn -c -g "Netherlands"'
-    result = subprocess.run(command, shell=True, capture_output=True, text=True)
-    time.sleep(5)
-    if result.returncode == 0:
-        logging.info(f"Successful connection created with VPN.")
+    if USE_VPN:
+        command = r'cd "C:\Program Files\NordVPN" && nordvpn -c -g "Netherlands"'
+        result = subprocess.run(command, shell=True, capture_output=True, text=True)
+        time.sleep(10)
+        if result.returncode == 0:
+            logging.info(f"Successful connection created with VPN.")
+        else:
+            logging.info(f"Unsuccessful connection with VPN. Return code is {result.returncode}")
+            sys.exit()
     else:
-        logging.info(f"Unsuccessful connection with VPN. Return code is {result.returncode}")
-        sys.exit()
+        logging.info(f"No VPN activated intentionally.")
 
     # Process all adverts
-    is_processing_all = 1
+    if PROCESS_ALL:
+        logging.warning(f"Re-processing all data.")
 
     # Load variables from .env into the environment
     load_dotenv()
@@ -67,10 +75,10 @@ def main():
          50000, 52000, 54000, 56000, 58000, 60000, 62000, 64000, 66000, 68000, 70000, 75000, 80000, 85000, 90000, 95000,
          100000, 150000, 1e9])
     km_vec = np.array(
-        [0, 1, 2, 5, 10, 15, 20, 50, 100, 200, 500, 1000, 2000, 3000, 5000, 10000, 15000, 20000, 25000, 30000, 35000,
-         40000, 45000, 50000, 55000, 60000, 70000, 80000, 90000, 100000, 110000, 120000, 130000, 140000, 145000, 150000,
-         155000, 160000, 170000, 180000, 190000, 200000, 210000, 220000, 230000, 240000, 260000, 280000, 300000, 350000,
-         400000, 1e9])
+        [0, 1, 2, 5, 7, 10, 12, 15, 20, 50, 100, 200, 500, 1000, 2000, 3000, 5000, 10000, 15000, 20000, 25000, 30000,
+         35000, 40000, 45000, 50000, 55000, 60000, 70000, 80000, 90000, 100000, 110000, 120000, 130000, 140000, 145000,
+         150000, 155000, 160000, 170000, 180000, 190000, 200000, 210000, 220000, 230000, 240000, 260000, 280000, 300000,
+         350000, 400000, 1e9])
 
     base_url = "https://www.autoscout24.nl/lst"
     params = {
@@ -126,7 +134,7 @@ def main():
             # Innermost loop over pages
             for i in range(page_limit_autoscout):
                 params['page'] = i + 1
-                html = requests.get(base_url, params=params).text
+                html = requests.get(base_url, params=params, timeout=10).text
                 soup = BeautifulSoup(html, "html.parser")
                 car_listings = soup.find_all("article", class_="cldt-summary-full-item")
 
