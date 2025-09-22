@@ -310,5 +310,10 @@ def main():
     logging.info("Script finished successfully.")
 
 
-if __name__ == "__main__":
-    main()
+if __name__ == '__main__':
+    try:
+        main()
+    except Exception as e:
+        logging.exception("Unhandled exception occurred — script crashed!")
+        raise  # re-raise to make sure you still see the error in console
+
