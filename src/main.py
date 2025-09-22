@@ -11,10 +11,36 @@ from datetime import datetime
 import re
 import subprocess
 import sys
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+import random
 
 
 USE_VPN = 0
 PROCESS_ALL = 1
+
+
+def fetch_page(url, params, max_retries=3, timeout=30):
+    """Fetch a URL with retries and return response.text or None on failure."""
+    session = requests.Session()
+    retries = Retry(
+        total=max_retries,
+        backoff_factor=1,  # wait 1s, then 2s, then 4s between retries
+        status_forcelist=[429, 500, 502, 503, 504],  # retry on these HTTP codes
+        allowed_methods=["GET"]
+    )
+    session.mount("https://", HTTPAdapter(max_retries=retries))
+
+    try:
+        response = session.get(url, params=params, timeout=timeout)
+        response.raise_for_status()
+        return response.text
+    except requests.exceptions.ReadTimeout:
+        logging.warning(f"Read timeout for URL: {url} | params: {params}")
+    except requests.exceptions.RequestException as e:
+        logging.error(f"Request failed: {e}")
+
+    return None
 
 
 def is_valid_format(s, pattern):
@@ -134,7 +160,11 @@ def main():
             # Innermost loop over pages
             for i in range(page_limit_autoscout):
                 params['page'] = i + 1
-                html = requests.get(base_url, params=params, timeout=10).text
+                # html = requests.get(base_url, params=params, timeout=30).text
+                html = fetch_page(base_url, params)
+                if html is None:
+                    logging.warning(f"Skipping page due to repeated failures: {params}")
+                    continue  # go to next page
                 soup = BeautifulSoup(html, "html.parser")
                 car_listings = soup.find_all("article", class_="cldt-summary-full-item")
 
@@ -148,7 +178,7 @@ def main():
 
                     # Check if car is already in database
                     car_id = car.get("id")
-                    if car_id not in car_ids_in_upsert and ((car_id not in car_ids_in_database) or is_processing_all):
+                    if car_id not in car_ids_in_upsert and ((car_id not in car_ids_in_database) or PROCESS_ALL):
 
                         # Extract correct mileage
                         try:
@@ -241,7 +271,7 @@ def main():
                             cars_to_insert = []
                             car_ids_in_upsert = set()
 
-                time.sleep(0.01)
+                time.sleep(random.uniform(0.01, 0.2))  # 0.01–0.2s delay
 
             # Check and log if the page limit was reached for this mileage-price combination
             if page_limit_reached:
