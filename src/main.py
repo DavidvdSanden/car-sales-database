@@ -14,12 +14,15 @@ import sys
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 import random
+import cProfile
+import pstats
+import io
 
 # -------------------------
 # CONSTANTS
 # -------------------------
 USE_VPN = False
-PROCESS_ALL = True
+PROCESS_ALL = False
 PAGE_LIMIT = 20
 REFRESH_RATE = 10
 BATCH_SIZE = 500
@@ -138,14 +141,14 @@ def scrape_cars(supabase, table_name):
          5000, 5500, 6000, 6500, 7000, 7500, 8000, 8500, 9000, 9500, 10000, 10500, 11000, 11500, 12000, 12500, 13000,
          13500, 14000, 14500, 15000, 15500, 16000, 16500, 17000, 17500, 18000, 18500, 19000, 19500, 20000, 20500, 21000,
          21500, 22000, 22500, 23000, 24000, 24500, 25000, 26000, 27000, 28000, 28500, 29000, 30000, 31000, 32000, 33000,
-         34000, 35000, 36000, 37000, 38000, 39000, 40000, 41000, 42000, 43000, 44000, 45000, 46000, 47000, 48000, 49000,
-         50000, 52000, 54000, 56000, 58000, 60000, 62000, 64000, 66000, 68000, 70000, 75000, 80000, 85000, 90000, 95000,
-         100000, 150000, 1e9])
+         34000, 35000, 36000, 36500, 37000, 38000, 39000, 40000, 41000, 42000, 43000, 43500, 44000, 44500, 45000, 46000,
+         47000, 48000, 49000, 50000, 51000, 52000, 53000, 54000, 55000, 56000, 57000, 58000, 59000, 60000, 61000, 62000,
+         64000, 66000, 68000, 70000, 75000, 80000, 85000, 90000, 95000, 100000, 125000, 150000, 1e9])
     km_ranges: np.ndarray = np.array(
-        [0, 1, 2, 5, 7, 10, 12, 15, 20, 50, 100, 200, 500, 1000, 2000, 3000, 5000, 10000, 15000, 20000, 25000, 30000,
-         35000, 40000, 45000, 50000, 55000, 60000, 70000, 80000, 90000, 100000, 110000, 120000, 130000, 140000, 145000,
-         150000, 155000, 160000, 170000, 180000, 190000, 200000, 210000, 220000, 230000, 240000, 260000, 280000, 300000,
-         350000, 400000, 1e9])
+        [0, 1, 2, 5, 7, 8, 10, 11, 12, 15, 20, 50, 100, 200, 500, 1000, 2000, 3000, 5000, 10000, 15000, 20000, 25000,
+         30000, 35000, 40000, 45000, 50000, 55000, 60000, 70000, 80000, 90000, 100000, 110000, 120000, 130000, 140000,
+         145000, 150000, 155000, 160000, 170000, 180000, 190000, 200000, 210000, 220000, 230000, 240000, 260000, 280000,
+         300000, 350000, 400000, 1e9])
 
     base_url = "https://www.autoscout24.nl/lst"
     params = {
@@ -311,9 +314,24 @@ def main():
 
 
 if __name__ == '__main__':
+    pr = cProfile.Profile()
+    pr.enable()  # start profiling
     try:
         main()
     except Exception as e:
-        logging.exception("Unhandled exception occurred — script crashed!")
-        raise  # re-raise to make sure you still see the error in console
+        logging.exception("Script crashed")
+        raise
+    finally:
+        pr.disable()  # stop profiling
+
+        # Save profiling stats into a string buffer
+        s = io.StringIO()
+        ps = pstats.Stats(pr, stream=s)
+        ps.strip_dirs()
+        ps.sort_stats("cumtime")  # sort by cumulative time
+        ps.print_stats(20)  # top 20 slowest functions
+
+        # Log profiling results
+        logging.info("Profiling results:\n%s", s.getvalue())
+
 
