@@ -31,13 +31,22 @@ DB_REFRESH_RATE = 10
 BATCH_SIZE = 500
 POSTCODE_PATTERN = r'^\d{4}[A-Z]{2}$'
 
-ENABLE_MULTITHREADING = True      # set to False to run sequentially
-MAX_WORKERS = 8                   # number of threads when multithreading is enabled
+ENABLE_MULTITHREADING = True
+MAX_WORKERS = 8
 
-ENABLE_RATE_LIMITING = True       # set to True to enable request rate limit
-RATE_LIMIT_LOGGING = 1000         # logs actual time to take 100 requets
-REQUESTS_PER_SECOND = 10           # max number of requests/sec globally
-RANDOM_DELAY_RANGE = (0.01, 0.1)   # random sleep (in seconds) before each request
+ENABLE_RATE_LIMITING = True
+RATE_LIMIT_LOGGING = 1000
+REQUESTS_PER_SECOND = 5
+RANDOM_DELAY_RANGE = (0.01, 0.1)
+
+# --- Adaptive Throttling ---
+ADAPTIVE_THROTTLE_ENABLED = True
+THROTTLE_CHECK_INTERVAL = 20        # requests before checking 429 ratio
+THROTTLE_429_THRESHOLD = 0.1        # 10% of requests = slowdown trigger
+THROTTLE_REDUCTION_FACTOR = 0.8     # reduce RPS by 20%
+THROTTLE_MIN_RPS = 1.0              # min 1 request/sec
+THROTTLE_DELAY_INCREASE = 1.5       # increase delay range by 50%
+MAX_TOTAL_429 = 50                 # stop script after this many 429s total
 
 # -------------------------
 # NETWORK HELPERS
@@ -47,6 +56,11 @@ _rate_limit_lock = threading.Lock()
 
 _request_count = 0
 _start_window = monotonic()
+
+_throttle_lock = threading.Lock()
+_429_count = 0
+_total_request_attempts = 0
+_total_429_global = 0
 
 
 def fetch_page(url, params, max_retries=3, timeout=30):
@@ -60,8 +74,19 @@ def fetch_page(url, params, max_retries=3, timeout=30):
     )
     session.mount("https://", HTTPAdapter(max_retries=retries))
 
+    global _429_count, _total_request_attempts, _total_429_global
+
     try:
         response = session.get(url, params=params, timeout=timeout)
+        _total_request_attempts += 1
+        if response.status_code == 429:
+            _429_count += 1
+            _total_429_global += 1
+            logging.warning(f"HTTP 429 Too Many Requests for URL: {url}")
+            # Stop script if threshold reached
+            if _total_429_global >= MAX_TOTAL_429:
+                logging.critical(f"Exceeded MAX_TOTAL_429 ({MAX_TOTAL_429}). Stopping script immediately.")
+                sys.exit("Too many 429 errors — stopping script.")
         response.raise_for_status()
         return response.text
     except requests.exceptions.ReadTimeout:
@@ -69,6 +94,32 @@ def fetch_page(url, params, max_retries=3, timeout=30):
     except requests.exceptions.RequestException as e:
         logging.error(f"Request failed: {e}")
     return None
+
+
+def adjust_rate_limit_if_needed():
+    """Automatically reduce request rate and increase delay when too many 429s occur."""
+    global _429_count, _total_request_attempts, REQUESTS_PER_SECOND, RANDOM_DELAY_RANGE
+
+    with _throttle_lock:
+        if not ADAPTIVE_THROTTLE_ENABLED or _total_request_attempts < THROTTLE_CHECK_INTERVAL:
+            return
+
+        ratio_429 = _429_count / _total_request_attempts
+        if ratio_429 >= THROTTLE_429_THRESHOLD:
+            old_rps = REQUESTS_PER_SECOND
+            REQUESTS_PER_SECOND = max(THROTTLE_MIN_RPS, REQUESTS_PER_SECOND * THROTTLE_REDUCTION_FACTOR)
+            old_delay = RANDOM_DELAY_RANGE
+            RANDOM_DELAY_RANGE = (
+                old_delay[0] * THROTTLE_DELAY_INCREASE,
+                old_delay[1] * THROTTLE_DELAY_INCREASE
+            )
+            logging.warning(
+                f"Too many 429s ({ratio_429:.1%}). "
+                f"Reducing RPS from {old_rps:.2f} to {REQUESTS_PER_SECOND:.2f}, "
+                f"increasing delay to {RANDOM_DELAY_RANGE}."
+            )
+        _429_count = 0
+        _total_request_attempts = 0
 
 
 def rate_limited_fetch_page(url, params, max_retries=3, timeout=30):
@@ -90,6 +141,7 @@ def rate_limited_fetch_page(url, params, max_retries=3, timeout=30):
 
     # --- Fetch the page ---
     result = fetch_page(url, params, max_retries=max_retries, timeout=timeout)
+    adjust_rate_limit_if_needed()
 
     # --- Log actual requests/sec every 10 requests ---
     with _rate_limit_lock:
