@@ -30,14 +30,16 @@ PAGE_LIMIT = 20
 DB_REFRESH_RATE = 10
 BATCH_SIZE = 500
 POSTCODE_PATTERN = r'^\d{4}[A-Z]{2}$'
+BASE_URL_POST_CODE_API = "https://openpostcode.nl/api/address"
+POST_CODE_BATCH_SIZE = 100
 
-ENABLE_MULTITHREADING = True
+ENABLE_MULTITHREADING = False
 MAX_WORKERS = 8
 
 ENABLE_RATE_LIMITING = True
 RATE_LIMIT_LOGGING = 1000
 REQUESTS_PER_SECOND = 5
-RANDOM_DELAY_RANGE = (0.01, 0.1)
+RANDOM_DELAY_RANGE = (0.01, 0.10)
 
 # --- Adaptive Throttling ---
 ADAPTIVE_THROTTLE_ENABLED = True
@@ -229,6 +231,110 @@ def remove_duplicates(supabase, table_name, chunk_size=1000):
     for i in range(0, len(id_to_remove), chunk_size):
         chunk = id_to_remove[i:min(i + chunk_size, len(id_to_remove))]
         supabase.table(table_name).delete().in_("id", chunk).execute()
+
+
+def fetch_and_insert_postcodes(supabase):
+    """Fetch missing postcode info from openpostcode.nl API and insert into database."""
+    car_adverts_table = "autoscout_car_adverts"
+    postcodes_table = "postcode_info_nl"
+    global _total_429_global
+
+    logging.info("Starting postcode enrichment job...")
+
+    # --- Fetch existing postcodes ---
+    response = supabase.table(car_adverts_table).select("car_id, post_code, post_code_raw, transmission").execute()
+    postcodes_in_car_database = {d['post_code'] for d in response.data if d['post_code']}
+
+    response = supabase.table(postcodes_table).select("post_code", "latitude").execute()
+    df_postcodes = pd.DataFrame(response.data)
+    df_postcodes = df_postcodes.dropna(subset=['latitude'])
+    postcodes_in_database = set(df_postcodes['post_code'])
+
+    postcodes_to_insert = []
+    count_added = 0
+    total_to_process = len(postcodes_in_car_database - postcodes_in_database)
+    logging.info(f"Found {total_to_process} new postcodes to process.")
+
+    for idx, code in enumerate(postcodes_in_car_database):
+        if code in postcodes_in_database or not code:
+            continue
+        if _total_429_global >= MAX_TOTAL_429:
+            logging.critical("Max 429 limit reached during postcode processing. Stopping.")
+            break
+
+        params = {"postcode": code, "huisnummer": 1}
+
+        # --- Use adaptive throttling & retries ---
+        html = rate_limited_fetch_page(BASE_URL_POST_CODE_API, params)
+        if html is None:
+            logging.warning(f"Failed to fetch postcode {code}. Skipping.")
+            continue
+
+        try:
+            data = requests.utils.json.loads(html)
+        except Exception as e:
+            logging.warning(f"JSON decode error for {code}: {e}")
+            continue
+
+        # --- Handle 429 or error cases explicitly ---
+        if isinstance(data, dict) and "error" in data:
+            if data["error"] == "Huisnummer not found" and "suggestions" in data:
+                params["huisnummer"] = data["suggestions"][0]
+                html = rate_limited_fetch_page(BASE_URL_POST_CODE_API, params)
+                if html is None:
+                    continue
+                try:
+                    data = requests.utils.json.loads(html)
+                except Exception:
+                    continue
+            else:
+                logging.info(f"Skipping invalid postcode {code}: {data['error']}")
+                continue
+
+        # --- Extract fields safely ---
+        lat = data.get("latitude")
+        lon = data.get("longitude")
+        straat = data.get("straat")
+        buurt = data.get("buurt")
+        wijk = data.get("wijk")
+        woonplaats = data.get("woonplaats")
+        gemeente = data.get("gemeente")
+        provincie = data.get("provincie")
+        huisnummer = data.get("huisnummer")
+
+        postcode_info = {
+            "post_code": code,
+            "huisnummer": huisnummer,
+            "straat": straat,
+            "buurt": buurt,
+            "wijk": wijk,
+            "woonplaats": woonplaats,
+            "gemeente": gemeente,
+            "provincie": provincie,
+            "longitude": lon,
+            "latitude": lat,
+        }
+
+        postcodes_to_insert.append(postcode_info)
+        postcodes_in_database.add(code)
+
+        # --- Insert in batches ---
+        if len(postcodes_to_insert) >= POST_CODE_BATCH_SIZE:
+            logging.info(f"Inserting {len(postcodes_to_insert)} postcodes to DB...")
+            supabase.table(postcodes_table).upsert(postcodes_to_insert).execute()
+            count_added += len(postcodes_to_insert)
+            postcodes_to_insert.clear()
+
+        if idx % 50 == 0 and idx > 0:
+            logging.info(f"Progress: {idx}/{total_to_process} postcodes processed.")
+
+    # --- Final insert ---
+    if postcodes_to_insert:
+        logging.info(f"Inserting final {len(postcodes_to_insert)} postcodes to DB...")
+        supabase.table(postcodes_table).upsert(postcodes_to_insert).execute()
+        count_added += len(postcodes_to_insert)
+
+    logging.info(f"Postcode enrichment completed. Total inserted: {count_added}")
 
 
 # -------------------------
@@ -438,6 +544,7 @@ def main():
 
     scrape_cars(supabase, table_name)
     remove_duplicates(supabase, table_name)
+    fetch_and_insert_postcodes(supabase)
     logging.info("Script finished successfully.")
 
 
