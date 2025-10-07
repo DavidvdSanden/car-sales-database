@@ -29,6 +29,7 @@ This project contains a data pipeline that collects car advertisements from [Aut
 ### Software
 
 * Python 3.9+
+* Supabase account and tables named appropriately
 * NordVPN CLI installed and properly configured (Optional)
 
 ### Python Packages
@@ -95,4 +96,4 @@ You can modify the following parameters in the code:
 
 ---
 
-**Note:** Respect AutoScout24's terms of service and avoid excessive requests to prevent being blocked.
+_**Note:** Respect AutoScout24's terms of service and avoid excessive requests to prevent being blocked._
