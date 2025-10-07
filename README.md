@@ -96,4 +96,4 @@ You can modify the following parameters in the code:
 
 ---
 
-**Note:** Respect AutoScout24's terms of service and avoid excessive requests to prevent being blocked.
+_**Note:** Respect AutoScout24's terms of service and avoid excessive requests to prevent being blocked._
