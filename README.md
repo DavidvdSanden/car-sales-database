@@ -29,6 +29,7 @@ This project contains a data pipeline that collects car advertisements from [Aut
 ### Software
 
 * Python 3.9+
+* Supabase account and tables named appropriately
 * NordVPN CLI installed and properly configured (Optional)
 
 ### Python Packages
