@@ -2,7 +2,8 @@
 
 This project contains a data pipeline that collects car advertisements from [AutoScout24.nl](https://www.autoscout24.nl), processes the data, and stores it in a Supabase database. The data is linked to a PowerBI dashboard displaying information such as vehicle make, model, location, price, etc.
 
-<img width="1277" height="720" alt="image" src="https://github.com/user-attachments/assets/71b89f08-a89f-436e-b7d9-b7b01f6575da" />
+<img width="1199" height="674" alt="image" src="https://github.com/user-attachments/assets/8aa18a29-7e34-47c9-849f-f6d1aafb1714" />
+
 
 ## Features
 
@@ -84,10 +85,12 @@ You can modify the following parameters in the code:
 
 ## Dashboard
 
-* **General overview**:
-* **Location**:
-* **Price trends**:
-
+* **General overview**: Overall statistics on cars in database, top-selling brands, etc.
+* **Location**: Geospatial overview of where cars are sold within NL.
+* **Car Info**: Detailed information on specified model and make.
+* **Price trends**: Price trends for specified model and make over selected time period.
+* **Price**: Price comparisons between specified model and make.
+* **Database**: Overall database statistics on average prices, mileage, etc.
 
 ## Future Improvements
 
