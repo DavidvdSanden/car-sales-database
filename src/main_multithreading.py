@@ -29,17 +29,18 @@ PROCESS_ALL = False
 PAGE_LIMIT = 20
 DB_REFRESH_RATE = 10
 BATCH_SIZE = 500
+BATCH_SIZE_POSTCODES = 50
 POSTCODE_PATTERN = r'^\d{4}[A-Z]{2}$'
 BASE_URL_POST_CODE_API = "https://openpostcode.nl/api/address"
 POST_CODE_BATCH_SIZE = 100
 
 ENABLE_MULTITHREADING = False
-MAX_WORKERS = 8
+MAX_WORKERS = 16
 
 ENABLE_RATE_LIMITING = True
 RATE_LIMIT_LOGGING = 1000
 REQUESTS_PER_SECOND = 5
-RANDOM_DELAY_RANGE = (0.01, 0.10)
+RANDOM_DELAY_RANGE = (0.01, 0.05)
 
 # --- Adaptive Throttling ---
 ADAPTIVE_THROTTLE_ENABLED = True
@@ -242,20 +243,19 @@ def fetch_and_insert_postcodes(supabase):
     logging.info("Starting postcode enrichment job...")
 
     # --- Fetch existing postcodes ---
-    response = supabase.table(car_adverts_table).select("car_id, post_code, post_code_raw, transmission").execute()
-    postcodes_in_car_database = {d['post_code'] for d in response.data if d['post_code']}
-
-    response = supabase.table(postcodes_table).select("post_code", "latitude").execute()
-    df_postcodes = pd.DataFrame(response.data)
-    df_postcodes = df_postcodes.dropna(subset=['latitude'])
-    postcodes_in_database = set(df_postcodes['post_code'])
-
+    response = supabase.table(car_adverts_table).select("car_id, post_code").not_.is_("post_code", "null").execute()
+    df_full = pd.DataFrame(response.data)
+    postcodes_in_car_database = set(df_full['post_code'])
+    response = supabase.table(postcodes_table).select("post_code", "latitude").not_.is_("latitude", "null").execute()
+    df_full = pd.DataFrame(response.data)
+    postcodes_in_database = set(df_full['post_code'])
+    postcodes_not_in_database = postcodes_in_car_database.difference(postcodes_in_database)
     postcodes_to_insert = []
     count_added = 0
-    total_to_process = len(postcodes_in_car_database - postcodes_in_database)
+    total_to_process = len(postcodes_not_in_database)
     logging.info(f"Found {total_to_process} new postcodes to process.")
 
-    for idx, code in enumerate(postcodes_in_car_database):
+    for idx, code in enumerate(postcodes_not_in_database):
         if code in postcodes_in_database or not code:
             continue
         if _total_429_global >= MAX_TOTAL_429:
@@ -264,43 +264,56 @@ def fetch_and_insert_postcodes(supabase):
 
         params = {"postcode": code, "huisnummer": 1}
 
-        # --- Use adaptive throttling & retries ---
-        html = rate_limited_fetch_page(BASE_URL_POST_CODE_API, params)
-        if html is None:
-            logging.warning(f"Failed to fetch postcode {code}. Skipping.")
+        response = requests.get(BASE_URL_POST_CODE_API, params=params)
+        if response.status_code == 500:
+            logging.info(f"Response code 500 received for post code: {code}")
             continue
-
-        try:
-            data = requests.utils.json.loads(html)
-        except Exception as e:
-            logging.warning(f"JSON decode error for {code}: {e}")
+        elif response.status_code == 429:
+            logging.info(f"Response code 429 received for post code: {code}")
             continue
+        elif 'latitude' and 'longitude' in response.json().keys():
+            lat = response.json()['latitude']
+            lon = response.json()['longitude']
+            straat = response.json()['straat']
+            buurt = response.json()['buurt']
+            wijk = response.json()['wijk']
+            woonplaats = response.json()['woonplaats']
+            gemeente = response.json()['gemeente']
+            provincie = response.json()['provincie']
+            huisnummer = response.json()['huisnummer']
 
-        # --- Handle 429 or error cases explicitly ---
-        if isinstance(data, dict) and "error" in data:
-            if data["error"] == "Huisnummer not found" and "suggestions" in data:
-                params["huisnummer"] = data["suggestions"][0]
-                html = rate_limited_fetch_page(BASE_URL_POST_CODE_API, params)
-                if html is None:
-                    continue
-                try:
-                    data = requests.utils.json.loads(html)
-                except Exception:
-                    continue
-            else:
-                logging.info(f"Skipping invalid postcode {code}: {data['error']}")
+        elif response.json()['error'] == 'Huisnummer not found':
+            params = {
+                "postcode": code,
+                "huisnummer": response.json()['suggestions'][0]
+            }
+            response = requests.get(BASE_URL_POST_CODE_API, params=params)
+            if response.status_code == 500:
+                logging.info(f"Response code 500 received for post code: {code}")
                 continue
-
-        # --- Extract fields safely ---
-        lat = data.get("latitude")
-        lon = data.get("longitude")
-        straat = data.get("straat")
-        buurt = data.get("buurt")
-        wijk = data.get("wijk")
-        woonplaats = data.get("woonplaats")
-        gemeente = data.get("gemeente")
-        provincie = data.get("provincie")
-        huisnummer = data.get("huisnummer")
+            elif response.status_code == 429:
+                logging.info(f"Response code 429 received for post code: {code}")
+                continue
+            else:
+                lat = response.json()['latitude']
+                lon = response.json()['longitude']
+                straat = response.json()['straat']
+                buurt = response.json()['buurt']
+                wijk = response.json()['wijk']
+                woonplaats = response.json()['woonplaats']
+                gemeente = response.json()['gemeente']
+                provincie = response.json()['provincie']
+                huisnummer = response.json()['huisnummer']
+        else:
+            lat = None
+            lon = None
+            straat = None
+            buurt = None
+            wijk = None
+            woonplaats = None
+            gemeente = None
+            provincie = None
+            huisnummer = None
 
         postcode_info = {
             "post_code": code,
@@ -314,23 +327,17 @@ def fetch_and_insert_postcodes(supabase):
             "longitude": lon,
             "latitude": lat,
         }
-
         postcodes_to_insert.append(postcode_info)
         postcodes_in_database.add(code)
-
-        # --- Insert in batches ---
-        if len(postcodes_to_insert) >= POST_CODE_BATCH_SIZE:
-            logging.info(f"Inserting {len(postcodes_to_insert)} postcodes to DB...")
+        time.sleep(random.uniform(0.01, 0.05))
+        if len(postcodes_to_insert) >= BATCH_SIZE_POSTCODES:
+            logging.info(f"Inserting {len(postcodes_to_insert)} postcodes to the database...")
             supabase.table(postcodes_table).upsert(postcodes_to_insert).execute()
             count_added += len(postcodes_to_insert)
-            postcodes_to_insert.clear()
+            postcodes_to_insert = []
 
-        if idx % 50 == 0 and idx > 0:
-            logging.info(f"Progress: {idx}/{total_to_process} postcodes processed.")
-
-    # --- Final insert ---
     if postcodes_to_insert:
-        logging.info(f"Inserting final {len(postcodes_to_insert)} postcodes to DB...")
+        logging.info(f"Inserting final {len(postcodes_to_insert)} postcodes to the database...")
         supabase.table(postcodes_table).upsert(postcodes_to_insert).execute()
         count_added += len(postcodes_to_insert)
 
@@ -433,13 +440,14 @@ def process_page(base_url, params, car_ids_in_database, car_ids_in_upsert):
 def scrape_cars(supabase, table_name):
     """Main scraping loop over price, km, and page ranges with thread-safe locks."""
     price_ranges: np.ndarray = np.array(
-        [0, 500, 650, 700, 750, 850, 1000, 1100, 1250, 1500, 1750, 2000, 2250, 2500, 2750, 3000, 3250, 3500, 4000, 4500,
-         5000, 5500, 6000, 6500, 7000, 7500, 8000, 8500, 9000, 9500, 10000, 10500, 11000, 11500, 12000, 12500, 13000,
-         13500, 14000, 14500, 15000, 15500, 16000, 16500, 17000, 17500, 18000, 18500, 19000, 19500, 20000, 20500, 21000,
-         21500, 22000, 22500, 23000, 24000, 24500, 25000, 26000, 27000, 28000, 28500, 29000, 30000, 31000, 32000, 33000,
-         34000, 35000, 36000, 36500, 37000, 38000, 39000, 40000, 41000, 42000, 43000, 43500, 44000, 44500, 45000, 46000,
-         47000, 48000, 49000, 50000, 51000, 52000, 53000, 54000, 55000, 56000, 57000, 58000, 59000, 60000, 61000, 62000,
-         64000, 66000, 68000, 70000, 75000, 80000, 85000, 90000, 95000, 100000, 125000, 150000, 1e9])
+        [70000, 75000, 80000, 85000, 90000, 95000, 100000, 125000, 150000, 1e9])
+        # [0, 500, 650, 700, 750, 850, 1000, 1100, 1250, 1500, 1750, 2000, 2250, 2500, 2750, 3000, 3250, 3500, 4000, 4500,
+        #  5000, 5500, 6000, 6500, 7000, 7500, 8000, 8500, 9000, 9500, 10000, 10500, 11000, 11500, 12000, 12500, 13000,
+        #  13500, 14000, 14500, 15000, 15500, 16000, 16500, 17000, 17500, 18000, 18500, 19000, 19500, 20000, 20500, 21000,
+        #  21500, 22000, 22500, 23000, 24000, 24500, 25000, 26000, 27000, 28000, 28500, 29000, 30000, 31000, 32000, 33000,
+        #  34000, 35000, 36000, 36500, 37000, 38000, 39000, 40000, 41000, 42000, 43000, 43500, 44000, 44500, 45000, 46000,
+        #  47000, 48000, 49000, 50000, 51000, 52000, 53000, 54000, 55000, 56000, 57000, 58000, 59000, 60000, 61000, 62000,
+        #  64000, 66000, 68000, 70000, 75000, 80000, 85000, 90000, 95000, 100000, 125000, 150000, 1e9])
     km_ranges: np.ndarray = np.array(
         [0, 1, 2, 5, 7, 8, 10, 11, 12, 15, 20, 50, 100, 200, 500, 1000, 2000, 3000, 5000, 10000, 15000, 20000, 25000,
          30000, 35000, 40000, 45000, 50000, 55000, 60000, 70000, 80000, 90000, 100000, 110000, 120000, 130000, 140000,
@@ -496,11 +504,12 @@ def scrape_cars(supabase, table_name):
                                 car_ids_in_database.add(car_info['car_id'])
                                 car_ids_in_upsert.add(car_info['car_id'])
 
-                                if len(cars_to_insert) >= BATCH_SIZE:
-                                    insert_batch_to_db(supabase, table_name, cars_to_insert)
-                                    count_added += len(cars_to_insert)
-                                    cars_to_insert.clear()
-                                    car_ids_in_upsert.clear()
+                with ids_lock:
+                    if len(cars_to_insert) >= BATCH_SIZE:
+                        insert_batch_to_db(supabase, table_name, cars_to_insert)
+                        count_added += len(cars_to_insert)
+                        cars_to_insert.clear()
+                        car_ids_in_upsert.clear()
             else:
                 for page_index in range(PAGE_LIMIT):
                     page_params = params.copy()
@@ -513,11 +522,12 @@ def scrape_cars(supabase, table_name):
                             car_ids_in_database.add(car_info['car_id'])
                             car_ids_in_upsert.add(car_info['car_id'])
 
-                            if len(cars_to_insert) >= BATCH_SIZE:
-                                insert_batch_to_db(supabase, table_name, cars_to_insert)
-                                count_added += len(cars_to_insert)
-                                cars_to_insert.clear()
-                                car_ids_in_upsert.clear()
+                with ids_lock:
+                    if len(cars_to_insert) >= BATCH_SIZE:
+                        insert_batch_to_db(supabase, table_name, cars_to_insert)
+                        count_added += len(cars_to_insert)
+                        cars_to_insert.clear()
+                        car_ids_in_upsert.clear()
 
     # Insert remaining cars
     with ids_lock:
@@ -544,7 +554,10 @@ def main():
 
     scrape_cars(supabase, table_name)
     remove_duplicates(supabase, table_name)
-    fetch_and_insert_postcodes(supabase)
+    try:
+        fetch_and_insert_postcodes(supabase)
+    except Exception:
+        pass
     logging.info("Script finished successfully.")
 
 
