@@ -35,10 +35,10 @@ BASE_URL_POST_CODE_API = "https://openpostcode.nl/api/address"
 POST_CODE_BATCH_SIZE = 100
 
 ENABLE_MULTITHREADING = False
-MAX_WORKERS = 16
+MAX_WORKERS = 32
 
 ENABLE_RATE_LIMITING = True
-RATE_LIMIT_LOGGING = 1000
+RATE_LIMIT_LOGGING = 100
 REQUESTS_PER_SECOND = 5
 RANDOM_DELAY_RANGE = (0.01, 0.05)
 
@@ -218,10 +218,70 @@ def insert_batch_to_db(supabase, table_name, cars_to_insert):
         supabase.table(table_name).upsert(cars_to_insert, ignore_duplicates=True).execute()
 
 
+def fetch_all_rows_in_batches(
+    supabase,
+    table_name: str,
+    columns: str = "*",
+    batch_size: int = 5000,
+    max_batches: int | None = None
+):
+    """
+    Fetch all rows from a Supabase table in batches to avoid timeouts.
+
+    Args:
+        supabase: Supabase client instance
+        table_name: Name of the table to query
+        columns: Comma-separated column names or "*" for all
+        batch_size: Number of rows per batch
+        max_batches: Optional limit (for testing or large tables)
+
+    Returns:
+        List of dicts containing all rows fetched.
+    """
+    all_rows = []
+    offset = 0
+    batch_count = 0
+
+    while True:
+        try:
+            response = (
+                supabase.table(table_name)
+                .select(columns)
+                .range(offset, offset + batch_size - 1)
+                .execute()
+            )
+
+            data = response.data
+
+            # Stop when no more rows
+            if not data:
+                logging.info(f"No more rows after offset {offset}.")
+                break
+
+            all_rows.extend(data)
+            offset += batch_size
+            batch_count += 1
+
+            logging.info(f"Fetched {len(data)} rows (total {len(all_rows)}).")
+
+            # Optional: stop early if max_batches is set
+            if max_batches and batch_count >= max_batches:
+                logging.info(f"Reached max_batches ({max_batches}), stopping early.")
+                break
+
+        except Exception as e:
+            logging.error(f"Error fetching batch starting at {offset}: {e}")
+            time.sleep(2)
+            break
+
+    return all_rows
+
+
 def remove_duplicates(supabase, table_name, chunk_size=1000):
     """Remove duplicate car_id entries from database."""
-    response = supabase.table(table_name).select("id, car_id, make, listing_price").execute()
-    df_full = pd.DataFrame(response.data)
+    # response = supabase.table(table_name).select("id, car_id, make, listing_price").execute()
+    response = fetch_all_rows_in_batches(supabase, table_name, "id, car_id, make, listing_price", batch_size=50000)
+    df_full = pd.DataFrame(response)
     id_to_remove = df_full.loc[df_full.duplicated(subset=['car_id'], keep="first"), 'id'].values
 
     if len(id_to_remove) == 0:
@@ -243,11 +303,15 @@ def fetch_and_insert_postcodes(supabase):
     logging.info("Starting postcode enrichment job...")
 
     # --- Fetch existing postcodes ---
-    response = supabase.table(car_adverts_table).select("car_id, post_code").not_.is_("post_code", "null").execute()
-    df_full = pd.DataFrame(response.data)
+    # response = supabase.table(car_adverts_table).select("car_id, post_code").not_.is_("post_code", "null").execute()
+    # df_full = pd.DataFrame(response.data)
+    response = fetch_all_rows_in_batches(supabase, car_adverts_table, "car_id, post_code", batch_size=50000)
+    df_full = pd.DataFrame(response).dropna(subset=['post_code'])
     postcodes_in_car_database = set(df_full['post_code'])
-    response = supabase.table(postcodes_table).select("post_code", "latitude").not_.is_("latitude", "null").execute()
-    df_full = pd.DataFrame(response.data)
+    # response = supabase.table(postcodes_table).select("post_code", "latitude").not_.is_("latitude", "null").execute()
+    # df_full = pd.DataFrame(response.data)
+    response = fetch_all_rows_in_batches(supabase, car_adverts_table, "car_id, latitude", batch_size=50000)
+    df_full = pd.DataFrame(response).dropna(subset=['latitude'])
     postcodes_in_database = set(df_full['post_code'])
     postcodes_not_in_database = postcodes_in_car_database.difference(postcodes_in_database)
     postcodes_to_insert = []
@@ -357,7 +421,7 @@ def process_page(base_url, params, car_ids_in_database, car_ids_in_upsert):
     soup = BeautifulSoup(html, "html.parser")
     car_listings = soup.find_all("article", class_="cldt-summary-full-item")
     if not car_listings:
-        return []
+        return -1
 
     results = []
     for car in car_listings:
@@ -437,17 +501,49 @@ def process_page(base_url, params, car_ids_in_database, car_ids_in_upsert):
 # -------------------------
 # MAIN SCRAPING LOGIC
 # -------------------------
+
+def scrape_km_range(base_url, params, price_from, price_to, km_from, km_to,
+                    car_ids_in_database, car_ids_in_upsert):
+    """Scrape all pages for a given (price, km) pair."""
+    local_cars = []
+    local_ids = set()
+
+    for page_index in range(PAGE_LIMIT):
+        page_params = params.copy()
+        page_params.update({
+            "pricefrom": round(price_from),
+            "priceto": round(price_to),
+            "kmfrom": round(km_from),
+            "kmto": round(km_to),
+            "page": page_index + 1
+        })
+
+        page_results = process_page(base_url, page_params, car_ids_in_database, car_ids_in_upsert)
+
+        if page_results == -1:
+            # Reached end of pages containing cars
+            break
+        else:
+            local_cars.extend(page_results)
+            local_ids.update([car["car_id"] for car in page_results])
+
+        if page_index is PAGE_LIMIT:
+            logging.info(f"Reached page limit for price {params['pricefrom']}-{params['priceto']} "
+                         f"and mileage {params['kmfrom']}-{params['kmto']}")
+
+    return local_cars, local_ids
+
+
 def scrape_cars(supabase, table_name):
     """Main scraping loop over price, km, and page ranges with thread-safe locks."""
     price_ranges: np.ndarray = np.array(
-        [70000, 75000, 80000, 85000, 90000, 95000, 100000, 125000, 150000, 1e9])
-        # [0, 500, 650, 700, 750, 850, 1000, 1100, 1250, 1500, 1750, 2000, 2250, 2500, 2750, 3000, 3250, 3500, 4000, 4500,
-        #  5000, 5500, 6000, 6500, 7000, 7500, 8000, 8500, 9000, 9500, 10000, 10500, 11000, 11500, 12000, 12500, 13000,
-        #  13500, 14000, 14500, 15000, 15500, 16000, 16500, 17000, 17500, 18000, 18500, 19000, 19500, 20000, 20500, 21000,
-        #  21500, 22000, 22500, 23000, 24000, 24500, 25000, 26000, 27000, 28000, 28500, 29000, 30000, 31000, 32000, 33000,
-        #  34000, 35000, 36000, 36500, 37000, 38000, 39000, 40000, 41000, 42000, 43000, 43500, 44000, 44500, 45000, 46000,
-        #  47000, 48000, 49000, 50000, 51000, 52000, 53000, 54000, 55000, 56000, 57000, 58000, 59000, 60000, 61000, 62000,
-        #  64000, 66000, 68000, 70000, 75000, 80000, 85000, 90000, 95000, 100000, 125000, 150000, 1e9])
+        [0, 500, 650, 700, 750, 850, 1000, 1100, 1250, 1500, 1750, 2000, 2250, 2500, 2750, 3000, 3250, 3500, 4000, 4500,
+         5000, 5500, 6000, 6500, 7000, 7500, 8000, 8500, 9000, 9500, 10000, 10500, 11000, 11500, 12000, 12500, 13000,
+         13500, 14000, 14500, 15000, 15500, 16000, 16500, 17000, 17500, 18000, 18500, 19000, 19500, 20000, 20500, 21000,
+         21500, 22000, 22500, 23000, 24000, 24500, 25000, 26000, 27000, 28000, 28500, 29000, 30000, 31000, 32000, 33000,
+         34000, 35000, 36000, 36500, 37000, 38000, 39000, 40000, 41000, 42000, 43000, 43500, 44000, 44500, 45000, 46000,
+         47000, 48000, 49000, 50000, 51000, 52000, 53000, 54000, 55000, 56000, 57000, 58000, 59000, 60000, 61000, 62000,
+         64000, 66000, 68000, 70000, 75000, 80000, 85000, 90000, 95000, 100000, 125000, 150000, 1e9])
     km_ranges: np.ndarray = np.array(
         [0, 1, 2, 5, 7, 8, 10, 11, 12, 15, 20, 50, 100, 200, 500, 1000, 2000, 3000, 5000, 10000, 15000, 20000, 25000,
          30000, 35000, 40000, 45000, 50000, 55000, 60000, 70000, 80000, 90000, 100000, 110000, 120000, 130000, 140000,
@@ -474,68 +570,75 @@ def scrape_cars(supabase, table_name):
     # --- Lock for thread-safe modifications ---
     ids_lock = threading.Lock()
 
+    # --- Main nested loop (threading at KM level) ---
     for price_index in range(len(price_ranges) - 1):
-        params['pricefrom'] = round(price_ranges[price_index])
-        params['priceto'] = round(price_ranges[price_index + 1])
-        logging.info(f"Evaluating price range {params['pricefrom']}-{params['priceto']} "
+        price_from = round(price_ranges[price_index])
+        price_to = round(price_ranges[price_index + 1])
+        logging.info(f"Evaluating price range {price_from}-{price_to} "
                      f"({round(price_index / len(price_ranges) * 100, 2)}%)")
 
         if price_index % DB_REFRESH_RATE == 0:
-            car_ids_in_database = fetch_existing_car_ids(supabase, table_name)
+            car_ids_in_database = set(fetch_existing_car_ids(supabase, table_name))
 
-        for km_index in range(len(km_ranges) - 1):
-            params['kmfrom'] = round(km_ranges[km_index])
-            params['kmto'] = round(km_ranges[km_index + 1])
+        if ENABLE_MULTITHREADING:
+            with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+                futures = [
+                    executor.submit(
+                        scrape_km_range, base_url, params, price_from, price_to,
+                        km_ranges[i], km_ranges[i + 1],
+                        car_ids_in_database, car_ids_in_upsert
+                    )
+                    for i in range(len(km_ranges) - 1)
+                ]
 
-            if ENABLE_MULTITHREADING:
-                with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
-                    futures = []
-                    for page_index in range(PAGE_LIMIT):
-                        page_params = params.copy()
-                        page_params['page'] = page_index + 1
-                        futures.append(executor.submit(process_page, base_url, page_params,
-                                                       car_ids_in_database, car_ids_in_upsert))
+                for future in as_completed(futures):
+                    try:
+                        km_cars, _ = future.result()
+                        with ids_lock:
+                            for car in km_cars:
+                                car_id = car["car_id"]
+                                if car_id not in car_ids_in_database:
+                                    cars_to_insert.append(car)
+                                    car_ids_in_database.add(car_id)
+                                    car_ids_in_upsert.add(car_id)
 
-                    for future in as_completed(futures):
-                        page_results = future.result()
-                        with ids_lock:  # <-- protect shared data
-                            for car_info in page_results:
-                                cars_to_insert.append(car_info)
-                                car_ids_in_database.add(car_info['car_id'])
-                                car_ids_in_upsert.add(car_info['car_id'])
+                            if len(cars_to_insert) >= BATCH_SIZE:
+                                insert_batch_to_db(supabase, table_name, cars_to_insert)
+                                count_added += len(cars_to_insert)
+                                cars_to_insert.clear()
+                                car_ids_in_upsert.clear()
+                                logging.info(f"Inserted {count_added} total cars")
+                    except Exception as e:
+                        logging.error(f"Thread error: {e}")
+        else:
+            # Sequential fallback
+            for i in range(len(km_ranges) - 1):
+                km_cars, _ = scrape_km_range(
+                    base_url, params, price_from, price_to,
+                    km_ranges[i], km_ranges[i + 1],
+                    car_ids_in_database, car_ids_in_upsert
+                )
+                for car in km_cars:
+                    car_id = car["car_id"]
+                    if car_id not in car_ids_in_database:
+                        cars_to_insert.append(car)
+                        car_ids_in_database.add(car_id)
+                        car_ids_in_upsert.add(car_id)
 
-                with ids_lock:
-                    if len(cars_to_insert) >= BATCH_SIZE:
-                        insert_batch_to_db(supabase, table_name, cars_to_insert)
-                        count_added += len(cars_to_insert)
-                        cars_to_insert.clear()
-                        car_ids_in_upsert.clear()
-            else:
-                for page_index in range(PAGE_LIMIT):
-                    page_params = params.copy()
-                    page_params['page'] = page_index + 1
-                    page_results = process_page(base_url, page_params,
-                                                car_ids_in_database, car_ids_in_upsert)
-                    with ids_lock:  # <-- protect shared data
-                        for car_info in page_results:
-                            cars_to_insert.append(car_info)
-                            car_ids_in_database.add(car_info['car_id'])
-                            car_ids_in_upsert.add(car_info['car_id'])
+                if len(cars_to_insert) >= BATCH_SIZE:
+                    insert_batch_to_db(supabase, table_name, cars_to_insert)
+                    count_added += len(cars_to_insert)
+                    cars_to_insert.clear()
+                    car_ids_in_upsert.clear()
 
-                with ids_lock:
-                    if len(cars_to_insert) >= BATCH_SIZE:
-                        insert_batch_to_db(supabase, table_name, cars_to_insert)
-                        count_added += len(cars_to_insert)
-                        cars_to_insert.clear()
-                        car_ids_in_upsert.clear()
-
-    # Insert remaining cars
-    with ids_lock:
-        if cars_to_insert:
-            insert_batch_to_db(supabase, table_name, cars_to_insert)
-            count_added += len(cars_to_insert)
+        # Final insert
+    if cars_to_insert:
+        insert_batch_to_db(supabase, table_name, cars_to_insert)
+        count_added += len(cars_to_insert)
+        logging.info(f"Final batch inserted ({len(cars_to_insert)} cars)")
 
     logging.info(f"Total cars added: {count_added}")
+    return count_added
 
 
 # -------------------------
@@ -551,13 +654,12 @@ def main():
 
     if PROCESS_ALL:
         logging.warning("Re-processing all data.")
-
-    scrape_cars(supabase, table_name)
-    remove_duplicates(supabase, table_name)
     try:
+        scrape_cars(supabase, table_name)
+        remove_duplicates(supabase, table_name)
         fetch_and_insert_postcodes(supabase)
-    except Exception:
-        pass
+    except Exception as e:
+        logging.error(f"Error encountered during postcode collection: {e}")
     logging.info("Script finished successfully.")
 
 
