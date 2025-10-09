@@ -28,11 +28,12 @@ USE_VPN = False
 PROCESS_ALL = False
 PAGE_LIMIT = 20
 DB_REFRESH_RATE = 10
-BATCH_SIZE = 500
+BATCH_SIZE = 200
 BATCH_SIZE_POSTCODES = 50
 POSTCODE_PATTERN = r'^\d{4}[A-Z]{2}$'
 BASE_URL_POST_CODE_API = "https://openpostcode.nl/api/address"
 POST_CODE_BATCH_SIZE = 100
+MAX_DUPLICATES_REMOVAL = 1000
 
 ENABLE_MULTITHREADING = False
 MAX_WORKERS = 32
@@ -221,6 +222,7 @@ def insert_batch_to_db(supabase, table_name, cars_to_insert):
 def fetch_all_rows_in_batches(
     supabase,
     table_name: str,
+    key_column: str,
     columns: str = "*",
     batch_size: int = 5000,
     max_batches: int | None = None
@@ -247,6 +249,7 @@ def fetch_all_rows_in_batches(
             response = (
                 supabase.table(table_name)
                 .select(columns)
+                .order(key_column, desc=False)
                 .range(offset, offset + batch_size - 1)
                 .execute()
             )
@@ -277,21 +280,27 @@ def fetch_all_rows_in_batches(
     return all_rows
 
 
-def remove_duplicates(supabase, table_name, chunk_size=1000):
+def remove_duplicates(supabase, table_name, chunk_size=1000, max_removals=MAX_DUPLICATES_REMOVAL):
     """Remove duplicate car_id entries from database."""
-    # response = supabase.table(table_name).select("id, car_id, make, listing_price").execute()
-    response = fetch_all_rows_in_batches(supabase, table_name, "id, car_id, make, listing_price", batch_size=50000)
+    # response = supabase.table(table_name).select("id, car_id").execute()
+    # df_full = pd.DataFrame(response.data)
+    # car_id_to_remove = df_full.loc[df_full.duplicated(subset=['car_id'], keep="first"), 'car_id'].values
+    # logging.info(f"Original method has: {len(car_id_to_remove)} duplicate entries in database.")
+    response = fetch_all_rows_in_batches(supabase, table_name, "car_id", "id, car_id, make, listing_price", batch_size=50000)
     df_full = pd.DataFrame(response)
-    id_to_remove = df_full.loc[df_full.duplicated(subset=['car_id'], keep="first"), 'id'].values
+    car_id_to_remove = df_full.loc[df_full.duplicated(subset=['car_id'], keep="first"), 'car_id'].values
+    logging.info(f"New method has: {len(car_id_to_remove)} duplicate entries in database.")
 
-    if len(id_to_remove) == 0:
+    if len(car_id_to_remove) == 0:
         logging.info('No duplicates found in database.')
         return
 
-    logging.info(f"Removing {len(id_to_remove)} duplicate entries in database.")
-    for i in range(0, len(id_to_remove), chunk_size):
-        chunk = id_to_remove[i:min(i + chunk_size, len(id_to_remove))]
-        supabase.table(table_name).delete().in_("id", chunk).execute()
+    logging.info(f"Removing {len(car_id_to_remove)} duplicate entries in database.")
+    if len(car_id_to_remove) > max_removals:
+        logging.warning(f"More duplicates detected than threshold. Limiting removal to {max_removals}")
+    for i in range(0, min(max_removals, len(car_id_to_remove)), chunk_size):
+        chunk = car_id_to_remove[i:min(i + chunk_size, len(car_id_to_remove))]
+        supabase.table(table_name).delete().in_("car_id", chunk).execute()
 
 
 def fetch_and_insert_postcodes(supabase):
@@ -303,15 +312,15 @@ def fetch_and_insert_postcodes(supabase):
     logging.info("Starting postcode enrichment job...")
 
     # --- Fetch existing postcodes ---
-    # response = supabase.table(car_adverts_table).select("car_id, post_code").not_.is_("post_code", "null").execute()
-    # df_full = pd.DataFrame(response.data)
-    response = fetch_all_rows_in_batches(supabase, car_adverts_table, "car_id, post_code", batch_size=50000)
-    df_full = pd.DataFrame(response).dropna(subset=['post_code'])
+    response = supabase.table(car_adverts_table).select("car_id, post_code").not_.is_("post_code", "null").execute()
+    df_full = pd.DataFrame(response.data)
+    # response = fetch_all_rows_in_batches(supabase, car_adverts_table, "car_id, post_code", batch_size=50000)
+    # df_full = pd.DataFrame(response).dropna(subset=['post_code'])
     postcodes_in_car_database = set(df_full['post_code'])
-    # response = supabase.table(postcodes_table).select("post_code", "latitude").not_.is_("latitude", "null").execute()
-    # df_full = pd.DataFrame(response.data)
-    response = fetch_all_rows_in_batches(supabase, car_adverts_table, "car_id, latitude", batch_size=50000)
-    df_full = pd.DataFrame(response).dropna(subset=['latitude'])
+    response = supabase.table(postcodes_table).select("post_code", "latitude").not_.is_("latitude", "null").execute()
+    df_full = pd.DataFrame(response.data)
+    # response = fetch_all_rows_in_batches(supabase, postcodes_table, "post_code, latitude", batch_size=50000)
+    # df_full = pd.DataFrame(response).dropna(subset=['latitude'])
     postcodes_in_database = set(df_full['post_code'])
     postcodes_not_in_database = postcodes_in_car_database.difference(postcodes_in_database)
     postcodes_to_insert = []
@@ -544,6 +553,7 @@ def scrape_cars(supabase, table_name):
          34000, 35000, 36000, 36500, 37000, 38000, 39000, 40000, 41000, 42000, 43000, 43500, 44000, 44500, 45000, 46000,
          47000, 48000, 49000, 50000, 51000, 52000, 53000, 54000, 55000, 56000, 57000, 58000, 59000, 60000, 61000, 62000,
          64000, 66000, 68000, 70000, 75000, 80000, 85000, 90000, 95000, 100000, 125000, 150000, 1e9])
+        # [0, 500])
     km_ranges: np.ndarray = np.array(
         [0, 1, 2, 5, 7, 8, 10, 11, 12, 15, 20, 50, 100, 200, 500, 1000, 2000, 3000, 5000, 10000, 15000, 20000, 25000,
          30000, 35000, 40000, 45000, 50000, 55000, 60000, 70000, 80000, 90000, 100000, 110000, 120000, 130000, 140000,
