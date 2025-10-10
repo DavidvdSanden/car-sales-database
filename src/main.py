@@ -36,11 +36,11 @@ BASE_URL_POST_CODE_API = "https://openpostcode.nl/api/address"
 POST_CODE_BATCH_SIZE = 100
 MAX_DUPLICATES_REMOVAL = 1000
 
-ENABLE_MULTITHREADING = False
-MAX_WORKERS = 10
+ENABLE_MULTITHREADING = True
+MAX_WORKERS = 16
 
 ENABLE_RATE_LIMITING = True
-RATE_LIMIT_LOGGING = 100
+RATE_LIMIT_LOGGING = 500
 REQUESTS_PER_SECOND = 5
 RANDOM_DELAY_RANGE = (0.01, 0.05)
 
@@ -85,6 +85,9 @@ _session.mount("https://", _adapter)
 faulthandler.enable()
 
 
+# -------------------------
+# UTILITY FUNCTIONS
+# -------------------------
 def fetch_page(url, params, timeout=30, session=_session):
     """Fetch a URL with retries and return response.text or None on failure."""
     # session = requests.Session()
@@ -179,9 +182,6 @@ def rate_limited_fetch_page(url, params, max_retries=3, timeout=30):
     return result
 
 
-# -------------------------
-# UTILITY FUNCTIONS
-# -------------------------
 def setup_logging():
     """Configure logging with a timestamped file."""
     log_dir = os.path.join("..", "logging")
@@ -194,6 +194,8 @@ def setup_logging():
         level=logging.INFO,
         format='%(asctime)s - %(levelname)s - %(message)s'
     )
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
 
 
 def connect_vpn():
@@ -571,16 +573,16 @@ def scrape_km_range(base_url, params, price_from, price_to, km_from, km_to,
 def scrape_cars(table_name):
     """Main scraping loop over price, km, and page ranges with thread-safe locks."""
     price_ranges: np.ndarray = np.array(
-        # [0, 500, 650, 700, 750, 850, 1000, 1100, 1250, 1500, 1750, 2000, 2250, 2500, 2750, 3000, 3250, 3500, 4000, 4500,
-        #  5000, 5500, 6000, 6500, 7000, 7500, 8000, 8500, 9000, 9500, 10000, 10500, 11000, 11500, 12000, 12500, 13000,
-        #  13500, 14000, 14500, 15000, 15500, 16000, 16500, 17000, 17500, 18000, 18500, 19000, 19500, 19750, 20000, 20500,
-        #  21000, 21500, 22000, 22500, 23000, 23500, 24000, 24500, 25000, 26000, 27000, 28000, 28500, 29000, 30000, 31000, 32000,
-        #  33000, 34000, 34500, 35000, 35500, 36000, 36500, 37000, 37500, 38000, 39000, 39500, 40000, 41000, 42000, 43000, 43500, 44000, 44500, 45000,
-        #  46000, 47000, 48000, 49000, 50000, 51000, 52000, 53000, 54000, 55000, 56000, 57000, 58000, 59000, 60000, 61000,
-        #  62000, 64000, 66000, 68000, 70000, 75000, 80000, 85000, 90000, 95000, 100000, 125000, 150000, 1e9])
-        [42000, 43000, 43500, 44000, 44500, 45000, 46000, 47000, 48000, 49000, 50000, 51000, 52000, 53000, 54000, 55000,
-         56000, 57000, 58000, 59000, 60000, 61000, 62000, 64000, 66000, 68000, 70000, 75000, 80000, 85000, 90000, 95000,
-         100000, 125000, 150000, 1e9])
+        [0, 500, 650, 700, 750, 850, 1000, 1100, 1250, 1500, 1750, 2000, 2250, 2500, 2750, 3000, 3250, 3500, 4000, 4500,
+         5000, 5500, 6000, 6500, 7000, 7500, 8000, 8500, 9000, 9500, 10000, 10500, 11000, 11500, 12000, 12500, 13000,
+         13500, 14000, 14500, 15000, 15500, 16000, 16500, 17000, 17500, 18000, 18500, 19000, 19500, 19750, 20000, 20500,
+         21000, 21500, 22000, 22500, 23000, 23500, 24000, 24500, 25000, 26000, 27000, 28000, 28500, 29000, 30000, 31000, 32000,
+         33000, 34000, 34500, 35000, 35500, 36000, 36500, 37000, 37500, 38000, 39000, 39500, 40000, 41000, 42000, 43000, 43500, 44000, 44500, 45000,
+         46000, 47000, 48000, 49000, 50000, 51000, 52000, 53000, 54000, 55000, 56000, 57000, 58000, 59000, 60000, 61000,
+         62000, 64000, 66000, 68000, 70000, 75000, 80000, 85000, 90000, 95000, 100000, 125000, 150000, 1e9])
+        # [47000, 48000, 49000, 50000, 51000, 52000, 53000, 54000, 55000,
+        #  56000, 57000, 58000, 59000, 60000, 61000, 62000, 64000, 66000, 68000, 70000, 75000, 80000, 85000, 90000, 95000,
+        #  100000, 125000, 150000, 1e9])
     km_ranges: np.ndarray = np.array(
         [0, 1, 2, 5, 7, 8, 10, 11, 12, 15, 20, 50, 100, 200, 500, 1000, 2000, 3000, 5000, 10000, 15000, 20000, 25000,
          30000, 35000, 40000, 45000, 50000, 55000, 60000, 70000, 80000, 90000, 100000, 110000, 120000, 130000, 140000,
@@ -599,10 +601,13 @@ def scrape_cars(table_name):
         "ustate": "N,U"
     }
 
-    car_ids_in_database = fetch_existing_car_ids(table_name)
+    car_rows = fetch_all_rows_in_batches(table_name, "car_id", "car_id", batch_size=50000)
+    car_ids_in_database = {row["car_id"] for row in car_rows if "car_id" in row}
     car_ids_in_upsert = set()
     cars_to_insert = []
     count_added = 0
+    if ENABLE_MULTITHREADING:
+        logging.info("Starting multithreaded scraping...")
 
     # --- Lock for thread-safe modifications ---
     ids_lock = threading.Lock()
@@ -615,7 +620,8 @@ def scrape_cars(table_name):
                      f"({round((price_index + 1) / len(price_ranges) * 100, 2)}%)")
 
         if price_index % DB_REFRESH_RATE == 0:
-            car_ids_in_database = set(fetch_existing_car_ids(table_name))
+            car_rows = fetch_all_rows_in_batches(table_name, "car_id", "car_id", batch_size=50000)
+            car_ids_in_database = {row["car_id"] for row in car_rows if "car_id" in row}
 
         if ENABLE_MULTITHREADING:
             with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
@@ -638,15 +644,16 @@ def scrape_cars(table_name):
                                     cars_to_insert.append(car)
                                     car_ids_in_database.add(car_id)
                                     car_ids_in_upsert.add(car_id)
-
-                            if len(cars_to_insert) >= BATCH_SIZE:
-                                insert_batch_to_db(table_name, cars_to_insert)
-                                count_added += len(cars_to_insert)
-                                cars_to_insert.clear()
-                                car_ids_in_upsert.clear()
-                                logging.info(f"Inserted {count_added} total cars")
                     except Exception as e:
                         logging.error(f"Thread error: {e}")
+
+            with ids_lock:
+                if len(cars_to_insert) >= BATCH_SIZE:
+                    insert_batch_to_db(table_name, cars_to_insert)
+                    count_added += len(cars_to_insert)
+                    cars_to_insert.clear()
+                    car_ids_in_upsert.clear()
+                    # logging.info(f"Inserted {count_added} total cars")
         else:
             # Sequential fallback
             for i in range(len(km_ranges) - 1):
@@ -662,17 +669,19 @@ def scrape_cars(table_name):
                         car_ids_in_database.add(car_id)
                         car_ids_in_upsert.add(car_id)
 
+            with ids_lock:
                 if len(cars_to_insert) >= BATCH_SIZE:
                     insert_batch_to_db(table_name, cars_to_insert)
                     count_added += len(cars_to_insert)
                     cars_to_insert.clear()
                     car_ids_in_upsert.clear()
 
-        # Final insert
-    if cars_to_insert:
-        insert_batch_to_db(table_name, cars_to_insert)
-        count_added += len(cars_to_insert)
-        logging.info(f"Final batch inserted ({len(cars_to_insert)} cars)")
+    # Final insert
+    with ids_lock:
+        if cars_to_insert:
+            insert_batch_to_db(table_name, cars_to_insert)
+            count_added += len(cars_to_insert)
+            logging.info(f"Final batch inserted ({len(cars_to_insert)} cars)")
 
     logging.info(f"Total cars added: {count_added}")
     return count_added
