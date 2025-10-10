@@ -2,7 +2,7 @@ import pandas as pd
 import numpy as np
 from bs4 import BeautifulSoup
 import requests
-from supabase import create_client, Client
+from supabase import create_client
 import time
 import logging
 import os
@@ -184,10 +184,13 @@ def rate_limited_fetch_page(url, params, max_retries=3, timeout=30):
 # -------------------------
 def setup_logging():
     """Configure logging with a timestamped file."""
+    log_dir = os.path.join("..", "logging")
+    os.makedirs(log_dir, exist_ok=True)
     now = datetime.now()
     timestamp = now.strftime("%Y-%m-%d_%H-%M-%S")
+    log_path = os.path.join(log_dir, f"script_log_{timestamp}.log")
     logging.basicConfig(
-        filename=f"../logging/script_log_{timestamp}.log",
+        filename=log_path,
         level=logging.INFO,
         format='%(asctime)s - %(levelname)s - %(message)s'
     )
