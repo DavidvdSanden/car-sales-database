@@ -20,6 +20,7 @@ import io
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 from time import monotonic
+import faulthandler
 
 # -------------------------
 # CONFIGURATION / TOGGLES
@@ -36,7 +37,7 @@ POST_CODE_BATCH_SIZE = 100
 MAX_DUPLICATES_REMOVAL = 1000
 
 ENABLE_MULTITHREADING = False
-MAX_WORKERS = 50
+MAX_WORKERS = 10
 
 ENABLE_RATE_LIMITING = True
 RATE_LIMIT_LOGGING = 100
@@ -81,6 +82,7 @@ _retry_strategy = Retry(
 _adapter = HTTPAdapter(max_retries=_retry_strategy, pool_connections=100, pool_maxsize=100)
 _session.mount("http://", _adapter)
 _session.mount("https://", _adapter)
+faulthandler.enable()
 
 
 def fetch_page(url, params, timeout=30, session=_session):
@@ -557,8 +559,8 @@ def scrape_km_range(base_url, params, price_from, price_to, km_from, km_to,
             local_ids.update([car["car_id"] for car in page_results])
 
         if page_index + 1 == PAGE_LIMIT:
-            logging.info(f"Reached page limit for price {params['pricefrom']}-{params['priceto']} "
-                         f"and mileage {params['kmfrom']}-{params['kmto']}")
+            logging.info(f"Reached page limit for price {page_params['pricefrom']}-{page_params['priceto']} "
+                         f"and mileage {page_params['kmfrom']}-{page_params['kmto']}")
 
     return local_cars, local_ids
 
@@ -606,10 +608,10 @@ def scrape_cars(table_name):
 
     # --- Main nested loop (threading at KM level) ---
     for price_index in range(len(price_ranges) - 1):
-        price_from = round(price_ranges[price_index])
-        price_to = round(price_ranges[price_index + 1])
+        price_from = int(price_ranges[price_index])
+        price_to = int(price_ranges[price_index + 1])
         logging.info(f"Evaluating price range {price_from}-{price_to} "
-                     f"({round(price_index / len(price_ranges) * 100, 2)}%)")
+                     f"({round((price_index + 1) / len(price_ranges) * 100, 2)}%)")
 
         if price_index % DB_REFRESH_RATE == 0:
             car_ids_in_database = set(fetch_existing_car_ids(table_name))
@@ -692,7 +694,7 @@ def main():
         remove_duplicates(table_name)
         fetch_and_insert_postcodes()
     except Exception as e:
-        logging.error(f"Error encountered during postcode collection: {e}")
+        logging.error(f"Error encountered: {e}")
     logging.info("Script finished successfully.")
 
 
