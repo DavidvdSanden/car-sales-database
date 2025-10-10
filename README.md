@@ -95,7 +95,7 @@ You can modify the following parameters in the code:
 ## Future Improvements
 
 * Add more robust error handling for network issues
-* Implement parallel scraping to improve speed
+* Add predictive models for price trends within PowerBI dashboard
 
 ---
 
