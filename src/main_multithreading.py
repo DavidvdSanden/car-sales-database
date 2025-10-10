@@ -36,7 +36,7 @@ POST_CODE_BATCH_SIZE = 100
 MAX_DUPLICATES_REMOVAL = 1000
 
 ENABLE_MULTITHREADING = False
-MAX_WORKERS = 32
+MAX_WORKERS = 50
 
 ENABLE_RATE_LIMITING = True
 RATE_LIMIT_LOGGING = 100
@@ -66,17 +66,33 @@ _429_count = 0
 _total_request_attempts = 0
 _total_429_global = 0
 
+# Global shared session with retry + backoff
+_session = requests.Session()
 
-def fetch_page(url, params, max_retries=3, timeout=30):
+# Define retry strategy
+_retry_strategy = Retry(
+    total=5,                # Retry up to 5 times
+    backoff_factor=1,       # Wait 1s, then 2s, 4s, etc.
+    status_forcelist=[429, 500, 502, 503, 504],  # Retry on these status codes
+    allowed_methods=["GET", "POST"]              # Safe methods to retry
+)
+
+# Attach the adapter to both HTTP and HTTPS
+_adapter = HTTPAdapter(max_retries=_retry_strategy, pool_connections=100, pool_maxsize=100)
+_session.mount("http://", _adapter)
+_session.mount("https://", _adapter)
+
+
+def fetch_page(url, params, timeout=30, session=_session):
     """Fetch a URL with retries and return response.text or None on failure."""
-    session = requests.Session()
-    retries = Retry(
-        total=max_retries,
-        backoff_factor=1,
-        status_forcelist=[429, 500, 502, 503, 504],
-        allowed_methods=["GET"]
-    )
-    session.mount("https://", HTTPAdapter(max_retries=retries))
+    # session = requests.Session()
+    # retries = Retry(
+    #     total=max_retries,
+    #     backoff_factor=1,
+    #     status_forcelist=[429, 500, 502, 503, 504],
+    #     allowed_methods=["GET"]
+    # )
+    # session.mount("https://", HTTPAdapter(max_retries=retries))
 
     global _429_count, _total_request_attempts, _total_429_global
 
@@ -144,7 +160,7 @@ def rate_limited_fetch_page(url, params, max_retries=3, timeout=30):
             _last_request_time = monotonic()
 
     # --- Fetch the page ---
-    result = fetch_page(url, params, max_retries=max_retries, timeout=timeout)
+    result = fetch_page(url, params, timeout=timeout)
     adjust_rate_limit_if_needed()
 
     # --- Log actual requests/sec every 10 requests ---
@@ -348,7 +364,7 @@ def fetch_and_insert_postcodes():
         elif response.status_code == 429:
             logging.info(f"Response code 429 received for post code: {code}")
             continue
-        elif 'latitude' and 'longitude' in response.json().keys():
+        elif all(k in response.json() for k in ("latitude", "longitude")):
             lat = response.json()['latitude']
             lon = response.json()['longitude']
             straat = response.json()['straat']
@@ -540,7 +556,7 @@ def scrape_km_range(base_url, params, price_from, price_to, km_from, km_to,
             local_cars.extend(page_results)
             local_ids.update([car["car_id"] for car in page_results])
 
-        if page_index == PAGE_LIMIT:
+        if page_index + 1 == PAGE_LIMIT:
             logging.info(f"Reached page limit for price {params['pricefrom']}-{params['priceto']} "
                          f"and mileage {params['kmfrom']}-{params['kmto']}")
 
@@ -550,19 +566,18 @@ def scrape_km_range(base_url, params, price_from, price_to, km_from, km_to,
 def scrape_cars(table_name):
     """Main scraping loop over price, km, and page ranges with thread-safe locks."""
     price_ranges: np.ndarray = np.array(
-        # [0, 500, 650, 700, 750, 850, 1000, 1100, 1250, 1500, 1750, 2000, 2250, 2500, 2750, 3000, 3250, 3500, 4000, 4500,
-        #  5000, 5500, 6000, 6500, 7000, 7500, 8000, 8500, 9000, 9500, 10000, 10500, 11000, 11500, 12000, 12500, 13000,
-        #  13500, 14000, 14500, 15000, 15500, 16000, 16500, 17000, 17500, 18000, 18500, 19000, 19500, 20000, 20500, 21000,
-        #  21500, 22000, 22500, 23000, 24000, 24500, 25000, 26000, 27000, 28000, 28500, 29000, 30000, 31000, 32000, 33000,
-        #  34000, 35000, 36000, 36500, 37000, 38000, 39000, 40000, 41000, 42000, 43000, 43500, 44000, 44500, 45000, 46000,
-        #  47000, 48000, 49000, 50000, 51000, 52000, 53000, 54000, 55000, 56000, 57000, 58000, 59000, 60000, 61000, 62000,
-        #  64000, 66000, 68000, 70000, 75000, 80000, 85000, 90000, 95000, 100000, 125000, 150000, 1e9])
-        [8000, 8500, 9000, 9500, 10000, 10500, 11000, 11500, 12000, 12500, 13000,
+        [0, 500, 650, 700, 750, 850, 1000, 1100, 1250, 1500, 1750, 2000, 2250, 2500, 2750, 3000, 3250, 3500, 4000, 4500,
+         5000, 5500, 6000, 6500, 7000, 7500, 8000, 8500, 9000, 9500, 10000, 10500, 11000, 11500, 12000, 12500, 13000,
          13500, 14000, 14500, 15000, 15500, 16000, 16500, 17000, 17500, 18000, 18500, 19000, 19500, 20000, 20500, 21000,
          21500, 22000, 22500, 23000, 24000, 24500, 25000, 26000, 27000, 28000, 28500, 29000, 30000, 31000, 32000, 33000,
          34000, 35000, 36000, 36500, 37000, 38000, 39000, 40000, 41000, 42000, 43000, 43500, 44000, 44500, 45000, 46000,
          47000, 48000, 49000, 50000, 51000, 52000, 53000, 54000, 55000, 56000, 57000, 58000, 59000, 60000, 61000, 62000,
          64000, 66000, 68000, 70000, 75000, 80000, 85000, 90000, 95000, 100000, 125000, 150000, 1e9])
+        # [15500, 16000, 16500, 17000, 17500, 18000, 18500, 19000, 19500, 20000, 20500, 21000,
+        #  21500, 22000, 22500, 23000, 24000, 24500, 25000, 26000, 27000, 28000, 28500, 29000, 30000, 31000, 32000, 33000,
+        #  34000, 35000, 36000, 36500, 37000, 38000, 39000, 40000, 41000, 42000, 43000, 43500, 44000, 44500, 45000, 46000,
+        #  47000, 48000, 49000, 50000, 51000, 52000, 53000, 54000, 55000, 56000, 57000, 58000, 59000, 60000, 61000, 62000,
+        #  64000, 66000, 68000, 70000, 75000, 80000, 85000, 90000, 95000, 100000, 125000, 150000, 1e9])
     km_ranges: np.ndarray = np.array(
         [0, 1, 2, 5, 7, 8, 10, 11, 12, 15, 20, 50, 100, 200, 500, 1000, 2000, 3000, 5000, 10000, 15000, 20000, 25000,
          30000, 35000, 40000, 45000, 50000, 55000, 60000, 70000, 80000, 90000, 100000, 110000, 120000, 130000, 140000,
