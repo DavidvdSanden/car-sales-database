@@ -1,4 +1,4 @@
-requests==2.32.4
+requests>=2.32.4
 pandas==2.3.1
 numpy==2.3.2
 beautifulsoup4==4.13.4
@@ -14,3 +14,5 @@ descartes==1.1.0
 pgeocode==0.5.0
 openpyxl==3.1.5
 urllib3==2.5.0
+scikit-learn~=1.7.2
+category_encoders>=2.6.0
