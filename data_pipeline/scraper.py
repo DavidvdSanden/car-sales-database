@@ -90,14 +90,6 @@ faulthandler.enable()
 # -------------------------
 def fetch_page(url, params, timeout=30, session=_session):
     """Fetch a URL with retries and return response.text or None on failure."""
-    # session = requests.Session()
-    # retries = Retry(
-    #     total=max_retries,
-    #     backoff_factor=1,
-    #     status_forcelist=[429, 500, 502, 503, 504],
-    #     allowed_methods=["GET"]
-    # )
-    # session.mount("https://", HTTPAdapter(max_retries=retries))
 
     global _429_count, _total_request_attempts, _total_429_global
 
@@ -269,28 +261,26 @@ def fetch_all_rows_in_batches(
     all_rows = []
     offset = 0
     batch_count = 0
+    last_key = None
 
     while True:
         try:
-            response = (
-                supabase.table(table_name)
-                .select(columns)
-                .order(key_column, desc=False)
-                .range(offset, offset + batch_size - 1)
-                .execute()
-            )
 
+            query = supabase.table(table_name).select(columns).order(key_column, desc=False).limit(batch_size)
+            if last_key is not None:
+                query = query.gt(key_column, last_key)
+
+            response = query.execute()
             data = response.data
 
-            # Stop when no more rows
             if not data:
-                logging.info(f"No more rows after offset {offset}.")
                 break
 
             all_rows.extend(data)
+            last_key = data[-1][key_column]  # last key fetched
+
             offset += batch_size
             batch_count += 1
-
             logging.info(f"Fetched {len(data)} rows (total {len(all_rows)}).")
 
             # Optional: stop early if max_batches is set
@@ -308,11 +298,7 @@ def fetch_all_rows_in_batches(
 
 def remove_duplicates(table_name, chunk_size=1000, max_removals=MAX_DUPLICATES_REMOVAL):
     """Remove duplicate car_id entries from database."""
-    # response = supabase.table(table_name).select("id, car_id").execute()
-    # df_full = pd.DataFrame(response.data)
-    # car_id_to_remove = df_full.loc[df_full.duplicated(subset=['car_id'], keep="first"), 'car_id'].values
-    # logging.info(f"Original method has: {len(car_id_to_remove)} duplicate entries in database.")
-    response = fetch_all_rows_in_batches(table_name, "car_id", "id, car_id, make, listing_price", batch_size=50000)
+    response = fetch_all_rows_in_batches(table_name, "car_id", "id, car_id, make, listing_price", batch_size=20000)
     df_full = pd.DataFrame(response)
     car_id_to_remove = df_full.loc[df_full.duplicated(subset=['car_id'], keep="first"), 'car_id'].values
     logging.info(f"New method has: {len(car_id_to_remove)} duplicate entries in database.")
@@ -340,13 +326,9 @@ def fetch_and_insert_postcodes():
     logging.info("Starting postcode enrichment job...")
 
     # --- Fetch existing postcodes ---
-    # response = supabase.table(car_adverts_table).select("car_id, post_code").not_.is_("post_code", "null").execute()
-    # df_full = pd.DataFrame(response.data)
     response = fetch_all_rows_in_batches(car_adverts_table, "car_id", "car_id, post_code", batch_size=50000)
     df_full = pd.DataFrame(response).dropna(subset=['post_code'])
     postcodes_in_car_database = set(df_full['post_code'])
-    # response = supabase.table(postcodes_table).select("post_code", "latitude").not_.is_("latitude", "null").execute()
-    # df_full = pd.DataFrame(response.data)
     response = fetch_all_rows_in_batches(postcodes_table, "post_code", "post_code, latitude", batch_size=50000)
     df_full = pd.DataFrame(response).dropna(subset=['latitude'])
     postcodes_in_database = set(df_full['post_code'])
@@ -581,9 +563,7 @@ def scrape_cars(table_name):
          33000, 34000, 34500, 35000, 35500, 36000, 36500, 37000, 37500, 38000, 39000, 39500, 40000, 41000, 42000, 43000, 43500, 44000, 44500, 45000,
          46000, 47000, 48000, 49000, 50000, 51000, 52000, 53000, 54000, 55000, 56000, 57000, 58000, 59000, 60000, 61000,
          62000, 64000, 66000, 68000, 70000, 75000, 80000, 85000, 90000, 95000, 100000, 125000, 150000, 1e9])
-        # [33000, 34000, 34500, 35000, 35500, 36000, 36500, 37000, 37500, 38000, 39000, 39500, 40000, 41000, 42000, 43000, 43500, 44000, 44500, 45000,
-        #  46000, 47000, 48000, 49000, 50000, 51000, 52000, 53000, 54000, 55000, 56000, 57000, 58000, 59000, 60000, 61000,
-        #  62000, 64000, 66000, 68000, 70000, 75000, 80000, 85000, 90000, 95000, 100000, 125000, 150000, 1e9])
+        # [150000, 1e9])
     km_ranges: np.ndarray = np.array(
         [0, 1, 2, 5, 7, 8, 10, 11, 12, 15, 20, 50, 100, 200, 500, 1000, 2000, 3000, 5000, 10000, 15000, 20000, 25000,
          30000, 35000, 40000, 45000, 50000, 55000, 60000, 70000, 80000, 90000, 100000, 110000, 120000, 130000, 140000,
