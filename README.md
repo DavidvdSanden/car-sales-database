@@ -1,102 +1,188 @@
-# AutoScout24 Scraper
+# 🚗 Car Sales Database — AutoScout24 Scraper & Price Prediction
 
-This project contains a data pipeline that collects car advertisements from [AutoScout24.nl](https://www.autoscout24.nl), processes the data, and stores it in a Supabase database. The data is linked to a PowerBI dashboard displaying information such as vehicle make, model, location, price, etc.
+This project builds a complete **data pipeline**, **machine learning model**, and **Power BI dashboard** to analyze car advertisements from [AutoScout24.nl](https://www.autoscout24.nl).  
 
-<img width="1199" height="674" alt="image" src="https://github.com/user-attachments/assets/8aa18a29-7e34-47c9-849f-f6d1aafb1714" />
+<img width="1448" height="812" alt="image" src="https://github.com/user-attachments/assets/ec721c20-0262-480a-bb55-09f218e5368a" />
 
+It automatically scrapes listings, processes and stores them, and powers an interactive Power BI dashboard with insights such as:
+- Price and mileage trends  
+- Brand and model distribution  
+- Predicted price trends for selected vehicles  
 
-## Features
+---
 
-* **Data Scraping:** Iterates through price and mileage ranges, fetching and parsing:
-  * Price
-  * Mileage
-  * Postal code
-  * Fuel type
-  * Transmission
-  * Power (kW & HP)
-  * Model & version
-  * Range (if available)
-    
-* **Database Integration:**
-  * Connects to Supabase using `SUPABASE_URL` and `SUPABASE_KEY` from `.env`
-  * Upserts (inserts or updates) new ads
-  * Removes duplicates based on `car_id`
-    
-* **Logging:** All steps and warnings are logged in a timestamped log file.
-* **VPN Connection (Optional):** Automatically connects to NordVPN (Netherlands server) before scraping starts.
+## 📁 Project Structure
 
-## Requirements
+```bash
+car-sales-database/
+│
+├── app/ # (Future) deployment components (e.g. API or Streamlit app)
+│
+├── data_pipeline/ # Data scraping and preprocessing
+│ ├── logs/ # Runtime logs
+│ ├── notebooks/ # Development and EDA notebooks
+│ └── scraper.py # Main AutoScout24 scraper
+│
+├── ml_model/ # Machine learning models and training scripts
+│ └── notebooks/ # Model experimentation (linear regression, xG-style models, etc.)
+│
+├── pbi_dashboards/ # Power BI dashboards
+│ └── main_dashboard.pbix # Linked to Supabase data and predictive model output
+│
+├── images/ # Plots, model output, or screenshots for documentation
+│
+├── .env # Supabase credentials and environment variables
+├── .gitignore
+├── requirements.txt
+└── README.md
+```
 
-### Software
+---
 
-* Python 3.9+
-* Supabase account and tables named appropriately
-* NordVPN CLI installed and properly configured (Optional)
+## ⚙️ Features
 
-### Python Packages
+### **1. Data Scraping**
+The pipeline iterates over **price** and **mileage** ranges to collect data from AutoScout24, extracting:
+- Price  
+- Mileage  
+- Postal code  
+- Fuel type  
+- Transmission  
+- Power (kW / HP)  
+- Model & version  
+- Range (if available)
 
+> 🧩 *Optional:* Automatically connects to a NordVPN Netherlands server before scraping for stable access.
+
+---
+
+### **2. Database Integration**
+- Connects to **Supabase** using credentials from `.env`
+- Performs **upserts** (insert/update) to avoid duplicates  
+- Removes redundant entries based on `car_id`
+
+---
+
+### **3. Machine Learning Model**
+Inside `ml_model/`, a **Linear Regression pipeline** predicts car prices using both numerical and categorical features (`make`, `model`, `year`, etc.).
+
+Features include:
+- Automated preprocessing (OneHotEncoding & TargetEncoding)
+- Model evaluation (MAE, RMSE, R²)
+- Trained model persisted via `joblib`
+- Ready for integration with Power BI or API endpoints
+
+Example prediction usage:
+```python
+import joblib, pandas as pd
+
+model = joblib.load("ml_model/car_price_model.pkl")
+
+new_car = pd.DataFrame([{
+    'make': 'Toyota',
+    'model': 'Corolla',
+    'year': 2018,
+    'mileage': 30000,
+    'engine_size': 1.8
+}])
+
+pred = model.predict(new_car)
+print(f"Predicted price: €{pred[0]:,.0f}")
+```
+
+---
+
+### **4. Power BI Dashboard**
+Located in `pbi_dashboards/main_dashboard.pbix`.
+
+**Dashboard pages:**
+- **Overview:** Market summary and top-selling brands  
+- **Location:** Distribution of listings across NL  
+- **Car Info:** Details by make and model  
+- **Price Trends:** Price evolution and predictions for selected vehicles  
+- **Database:** Overall statistics on average prices, mileage, etc.  
+
+---
+
+## 🧰 Requirements
+
+### **Software**
+- Python 3.11+
+- Supabase account (with appropriate tables)
+- Optional: NordVPN CLI for network stability
+
+### **Python Packages**
 Install dependencies:
-
 ```bash
 pip install -r requirements.txt
 ```
 
-### Environment Variables
+---
 
-Create a `.env` file in the project root:
-
-```
+## 🔑 Environment Variables
+Create a .env file in the project root:
+```bash
 SUPABASE_URL=your_supabase_url
 SUPABASE_KEY=your_supabase_service_key
 ```
 
-## Usage
-
-Run the script:
-
+If using VPN:
 ```bash
-python main.py
+NORDVPN_USERNAME=your_username
+NORDVPN_PASSWORD=your_password
 ```
 
-The script will:
-
-1. Connect to NordVPN
-2. Load Supabase credentials
-3. Iterate over price and mileage ranges
-4. Scrape ads and insert them into the database in batches
-5. Remove duplicate entries
-
-## Logging
-
-Log files are stored in `../logging/` and are automatically named like:
-
-```
-script_log_2025-09-21_14-30-12.log
+## ▶️ Usage
+#### 1. Run Scraper
+``` python
+python data_pipeline/scraper.py
 ```
 
-## Customization
+This will:
+- Connect to NordVPN (optional)
+- Fetch and parse car ads
+- Insert data into Supabase
+- Log all activity in data_pipeline/logs/
 
-You can modify the following parameters in the code:
+#### 2. Train the Model
 
-* **`price_vec` and `km_vec`**: price and mileage ranges
-* **`page_limit_autoscout`**: number of pages per query
-* **`batch_size`**: batch size for database upserts
-* **`refresh_rate_cars_in_database`**: how often existing car IDs are refreshed
+Train or retrain using your dataset:
+```python
+python ml_model/train_model.py
+```
 
-## Dashboard
+Model output:
+- ml_model/car_price_model.pkl
 
-* **General overview**: Overall statistics on cars in database, top-selling brands, etc.
-* **Location**: Geospatial overview of where cars are sold within NL.
-* **Car Info**: Detailed information on specified model and make.
-* **Price trends**: Price trends for specified model and make over selected time period.
-* **Price**: Price comparisons between specified model and make.
-* **Database**: Overall database statistics on average prices, mileage, etc.
+#### 3. Visualize in Power BI
 
-## Future Improvements
-
-* Add more robust error handling for network issues
-* Add predictive models for price trends within PowerBI dashboard
+1. Open pbi_dashboards/main_dashboard.pbix
+2. Refresh connections to Supabase → visualize latest data and predictions.
 
 ---
 
-_**Note:** Respect AutoScout24's terms of service and avoid excessive requests to prevent being blocked._
+## 🧾 Logging
+
+Logs are automatically saved in:
+- data_pipeline/logs/
+
+Format:
+- scraper_log_2025-10-11_14-30-12.log
+
+---
+
+## 🚀 Future Improvements
+
+- Expand ML models (e.g. gradient boosting, xG-like estimators for performance analysis)
+- Automate Power BI refresh via Supabase webhook
+- Add Streamlit or FastAPI interface for on-demand price predictions
+
+---
+
+## ⚠️ Disclaimer
+
+_This project is for educational purposes only._
+
+_Respect AutoScout24’s Terms of Service — avoid excessive requests to prevent IP blocking._
+
+
