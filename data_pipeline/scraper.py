@@ -446,16 +446,19 @@ def process_page(base_url, params, car_ids_in_database, car_ids_in_upsert):
     for car in car_listings:
         car_id = car.get("id")
         if car_id not in car_ids_in_upsert and ((car_id not in car_ids_in_database) or PROCESS_ALL):
+            # Mileage
             try:
                 data_mileage = float(car.get("data-mileage"))
             except (ValueError, TypeError):
                 data_mileage = -1
 
+            # Listing price
             try:
                 listing_price = float(car.get("data-price"))
             except (ValueError, TypeError):
                 listing_price = -1
 
+            # Postcode
             raw_postcode = car.get("data-listing-zip-code")
             try:
                 postcode = raw_postcode[0:4] + raw_postcode[-2:].upper()
@@ -464,6 +467,7 @@ def process_page(base_url, params, car_ids_in_database, car_ids_in_upsert):
             except:
                 postcode = None
 
+            # Transmission, fuel, power
             transmission = car.find("span", {"data-testid": "VehicleDetails-transmission"})
             fuel = car.find("span", {"data-testid": "VehicleDetails-gas_pump"})
             power = car.find("span", {"data-testid": "VehicleDetails-speedometer"})
@@ -479,23 +483,34 @@ def process_page(base_url, params, car_ids_in_database, car_ids_in_upsert):
                     kw_value = float(match.group(1))
                     pk_value = float(match.group(2))
 
+            # Model and version
             title_element = car.find("span", class_="ListItem_title_bold__iQJRq")
             model_text = title_element.get_text(strip=True) if title_element else None
             version_element = car.find("span", class_="ListItem_version__5EWfi")
             version_text = version_element.get_text(strip=True) if version_element else None
 
+            # Actieradius / range
             actieradius_element = car.find("span", attrs={"aria-label": "actieradius"})
             actieradius_text = actieradius_element.get_text(strip=True) if actieradius_element else None
-
             ranges = [float(num) for num in re.findall(r"\d+(?:\.\d+)?", actieradius_text)] if actieradius_text else []
             general_range = ranges[0] if len(ranges) > 0 else None
             urban_range = ranges[1] if len(ranges) > 1 else None
 
+            # First registration logic
+            first_reg_raw = car.get("data-first-registration", "").strip().lower()
+            if first_reg_raw == "unknown":
+                first_registration = None
+            elif first_reg_raw == "new":
+                first_registration = datetime.now().strftime("%m-%Y")
+            else:
+                first_registration = car.get("data-first-registration")
+
+            # Assemble final car info
             car_info = {
                 "car_id": car_id,
                 "make": car.get("data-make"),
                 "model": car.get("data-model"),
-                "first_registration": car.get("data-first-registration"),
+                "first_registration": first_registration,
                 "fuel_type": car.get("data-fuel-type"),
                 "mileage": data_mileage,
                 "post_code_raw": raw_postcode,
