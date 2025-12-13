@@ -21,6 +21,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import threading
 from time import monotonic
 import faulthandler
+import json
 
 # -------------------------
 # CONFIGURATION / TOGGLES
@@ -37,7 +38,7 @@ POST_CODE_BATCH_SIZE = 100
 MAX_DUPLICATES_REMOVAL = 1000
 
 ENABLE_MULTITHREADING = True
-MAX_WORKERS = 16
+MAX_WORKERS = 8
 
 ENABLE_RATE_LIMITING = True
 RATE_LIMIT_LOGGING = 500
@@ -84,14 +85,43 @@ _session.mount("http://", _adapter)
 _session.mount("https://", _adapter)
 faulthandler.enable()
 
+# Per-thread requests session to avoid sharing native state across threads
+_thread_local = threading.local()
+
+def get_thread_session():
+    s = getattr(_thread_local, "session", None)
+    if s is None:
+        s = requests.Session()
+        s.mount("http://", _adapter)
+        s.mount("https://", _adapter)
+        _thread_local.session = s
+    return s
+
+# Log uncaught thread exceptions to make debugging easier
+def _thread_excepthook(args):
+    try:
+        logging.exception("Uncaught thread exception", exc_info=(args.exc_type, args.exc_value, args.exc_traceback))
+    except Exception:
+        logging.exception("Error in thread excepthook")
+
+threading.excepthook = _thread_excepthook
+
+def _sys_excepthook(exc_type, exc_value, exc_tb):
+    logging.exception("Uncaught exception", exc_info=(exc_type, exc_value, exc_tb))
+
+sys.excepthook = _sys_excepthook
+
 
 # -------------------------
 # UTILITY FUNCTIONS
 # -------------------------
-def fetch_page(url, params, timeout=30, session=_session):
+def fetch_page(url, params, timeout=30, session=None):
     """Fetch a URL with retries and return response.text or None on failure."""
 
     global _429_count, _total_request_attempts, _total_429_global
+
+    # Use a per-thread session unless one was explicitly provided
+    session = session or get_thread_session()
 
     try:
         response = session.get(url, params=params, timeout=timeout)
@@ -298,7 +328,8 @@ def fetch_all_rows_in_batches(
 
 def remove_duplicates(table_name, chunk_size=1000, max_removals=MAX_DUPLICATES_REMOVAL):
     """Remove duplicate car_id entries from database."""
-    response = fetch_all_rows_in_batches(table_name, "car_id", "id, car_id, make, listing_price", batch_size=20000)
+    logging.info(f"Removing duplicates from database.")
+    response = fetch_all_rows_in_batches(table_name, "car_id", "id, car_id, make, listing_price", batch_size=1000)
     df_full = pd.DataFrame(response)
     car_id_to_remove = df_full.loc[df_full.duplicated(subset=['car_id'], keep="first"), 'car_id'].values
     logging.info(f"New method has: {len(car_id_to_remove)} duplicate entries in database.")
@@ -326,10 +357,10 @@ def fetch_and_insert_postcodes():
     logging.info("Starting postcode enrichment job...")
 
     # --- Fetch existing postcodes ---
-    response = fetch_all_rows_in_batches(car_adverts_table, "car_id", "car_id, post_code", batch_size=50000)
+    response = fetch_all_rows_in_batches(car_adverts_table, "car_id", "car_id, post_code", batch_size=1000)
     df_full = pd.DataFrame(response).dropna(subset=['post_code'])
     postcodes_in_car_database = set(df_full['post_code'])
-    response = fetch_all_rows_in_batches(postcodes_table, "post_code", "post_code, latitude", batch_size=50000)
+    response = fetch_all_rows_in_batches(postcodes_table, "post_code", "post_code, latitude", batch_size=1000)
     df_full = pd.DataFrame(response).dropna(subset=['latitude'])
     postcodes_in_database = set(df_full['post_code'])
     postcodes_not_in_database = postcodes_in_car_database.difference(postcodes_in_database)
@@ -425,6 +456,75 @@ def fetch_and_insert_postcodes():
         count_added += len(postcodes_to_insert)
 
     logging.info(f"Postcode enrichment completed. Total inserted: {count_added}")
+
+
+# -------------------------
+# RANGES FILE HELPERS
+# -------------------------
+def _ranges_file_path(filename: str = "ranges.json"):
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    return os.path.join(current_dir, filename)
+
+
+def load_ranges_from_file(path: str | None = None):
+    """Load price and km ranges from JSON file. Returns (price_list, km_list, settings).
+
+    If file missing or invalid, returns None for lists.
+    """
+    if path is None:
+        path = _ranges_file_path()
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            obj = json.load(f)
+        price = obj.get("price_ranges")
+        km = obj.get("km_ranges")
+        settings = obj.get("settings", {})
+        # Ensure numeric conversion
+        price = [float(x) for x in price] if price else None
+        km = [float(x) for x in km] if km else None
+        return price, km, settings
+    except FileNotFoundError:
+        logging.info(f"Ranges file not found at {path}. Using defaults.")
+        return None, None, {}
+    except Exception as e:
+        logging.error(f"Failed to load ranges file {path}: {e}")
+        return None, None, {}
+
+
+def save_ranges_to_file(price_list, km_list, path: str | None = None, settings: dict | None = None):
+    if path is None:
+        path = _ranges_file_path()
+    data = {
+        "price_ranges": [float(x) for x in price_list],
+        "km_ranges": [float(x) for x in km_list],
+        "settings": settings or {}
+    }
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+        logging.info(f"Saved updated ranges to {path}")
+    except Exception as e:
+        logging.error(f"Failed to save ranges file {path}: {e}")
+
+
+def split_and_insert_midpoint(ranges_list: list, start: float, end: float):
+    """Insert midpoint between start and end in ranges_list if exact boundary found.
+
+    Returns True if insertion done, False otherwise.
+    """
+    try:
+        # find index where consecutive values are start -> end
+        for i in range(len(ranges_list) - 1):
+            if float(ranges_list[i]) == float(start) and float(ranges_list[i + 1]) == float(end):
+                midpoint = (float(start) + float(end)) / 2.0
+                # avoid duplicates
+                if midpoint in ranges_list:
+                    return False
+                ranges_list.insert(i + 1, midpoint)
+                return True
+    except Exception as e:
+        logging.error(f"Error splitting range {start}-{end}: {e}")
+    return False
 
 
 # -------------------------
@@ -541,6 +641,7 @@ def scrape_km_range(base_url, params, price_from, price_to, km_from, km_to,
     """Scrape all pages for a given (price, km) pair."""
     local_cars = []
     local_ids = set()
+    reached_page_limit = False
 
     for page_index in range(PAGE_LIMIT):
         page_params = params.copy()
@@ -561,29 +662,48 @@ def scrape_km_range(base_url, params, price_from, price_to, km_from, km_to,
             local_cars.extend(page_results)
             local_ids.update([car["car_id"] for car in page_results])
 
+        # If we completed the last allowed page, mark that this range hit the page limit
         if page_index + 1 == PAGE_LIMIT:
             logging.info(f"Reached page limit for price {page_params['pricefrom']}-{page_params['priceto']} "
                          f"and mileage {page_params['kmfrom']}-{page_params['kmto']}")
+            reached_page_limit = True
 
-    return local_cars, local_ids
+    return local_cars, local_ids, reached_page_limit, price_from, price_to, km_from, km_to
 
 
 def scrape_cars(table_name):
     """Main scraping loop over price, km, and page ranges with thread-safe locks."""
-    price_ranges: np.ndarray = np.array(
-        [0, 500, 650, 700, 750, 850, 1000, 1100, 1250, 1500, 1750, 2000, 2250, 2500, 2750, 3000, 3250, 3500, 4000, 4500,
-         5000, 5500, 6000, 6500, 7000, 7500, 8000, 8500, 9000, 9500, 10000, 10500, 11000, 11500, 12000, 12500, 13000,
-         13500, 14000, 14500, 15000, 15500, 16000, 16500, 17000, 17500, 18000, 18500, 19000, 19500, 19750, 20000, 20500,
-         21000, 21500, 22000, 22500, 23000, 23500, 24000, 24500, 25000, 26000, 27000, 28000, 28500, 29000, 30000, 31000, 32000,
-         33000, 34000, 34500, 35000, 35500, 36000, 36500, 37000, 37500, 38000, 39000, 39500, 40000, 41000, 42000, 43000, 43500, 44000, 44500, 45000,
-         46000, 47000, 48000, 49000, 50000, 51000, 52000, 53000, 54000, 55000, 56000, 57000, 58000, 59000, 60000, 61000,
-         62000, 64000, 66000, 68000, 70000, 75000, 80000, 85000, 90000, 95000, 100000, 125000, 150000, 1e9])
-        # [150000, 1e9])
-    km_ranges: np.ndarray = np.array(
-        [0, 1, 2, 5, 7, 8, 10, 11, 12, 15, 20, 50, 100, 200, 500, 1000, 2000, 3000, 5000, 10000, 15000, 20000, 25000,
-         30000, 35000, 40000, 45000, 50000, 55000, 60000, 70000, 80000, 90000, 100000, 110000, 120000, 130000, 140000,
-         145000, 150000, 155000, 160000, 170000, 180000, 190000, 200000, 210000, 220000, 230000, 240000, 260000, 280000,
-         300000, 350000, 400000, 1e9])
+    # Load ranges from file if available; otherwise use built-in defaults
+    ranges_file = _ranges_file_path()
+    price_list, km_list, ranges_settings = load_ranges_from_file(ranges_file)
+    AUTO_ADJUST_ON_LIMIT = ranges_settings.get("auto_adjust_on_limit", True)
+
+    if price_list is None:
+        price_ranges: np.ndarray = np.array(
+            [0, 500, 650, 700, 750, 850, 1000, 1100, 1250, 1500, 1750, 2000, 2250, 2500, 2750, 3000, 3250, 3500, 4000, 4500,
+             5000, 5500, 6000, 6500, 7000, 7500, 8000, 8500, 9000, 9500, 10000, 10500, 11000, 11500, 12000, 12500, 13000,
+             13500, 14000, 14500, 15000, 15500, 16000, 16500, 17000, 17500, 18000, 18500, 19000, 19500, 19750, 20000, 20500,
+             21000, 21500, 22000, 22500, 23000, 23500, 24000, 24500, 25000, 26000, 27000, 28000, 28500, 29000, 30000, 31000, 32000,
+             33000, 34000, 34500, 35000, 35500, 36000, 36500, 37000, 37500, 38000, 39000, 39500, 40000, 41000, 42000, 43000, 43500, 44000, 44500, 45000,
+             46000, 47000, 48000, 49000, 50000, 51000, 52000, 53000, 54000, 55000, 56000, 57000, 58000, 59000, 60000, 61000,
+             62000, 64000, 66000, 68000, 70000, 75000, 80000, 85000, 90000, 95000, 100000, 125000, 150000, 1e9])
+        price_list = price_ranges.tolist()
+    else:
+        price_ranges = np.array(price_list)
+
+    if km_list is None:
+        km_ranges: np.ndarray = np.array(
+            [0, 1, 2, 5, 7, 8, 10, 11, 12, 15, 20, 50, 100, 200, 500, 1000, 2000, 3000, 5000, 10000, 15000, 20000, 25000,
+             30000, 35000, 40000, 45000, 50000, 55000, 60000, 70000, 80000, 85000, 90000, 95000, 100000, 110000, 120000, 130000, 140000,
+             145000, 150000, 155000, 160000, 170000, 180000, 190000, 200000, 210000, 220000, 230000, 240000, 260000, 280000,
+             300000, 350000, 400000, 1e9])
+        km_list = km_ranges.tolist()
+    else:
+        km_ranges = np.array(km_list)
+
+    ranges_lock = threading.Lock()
+    # Collect requested splits during the run; persist only at the end to avoid file write conflicts
+    splits_to_apply = set()
 
     base_url = "https://www.autoscout24.nl/lst"
     params = {
@@ -632,7 +752,7 @@ def scrape_cars(table_name):
 
                 for future in as_completed(futures):
                     try:
-                        km_cars, _ = future.result()
+                        km_cars, _, reached_limit, pf, pt, kf, kt = future.result()
                         with ids_lock:
                             for car in km_cars:
                                 car_id = car["car_id"]
@@ -640,6 +760,20 @@ def scrape_cars(table_name):
                                     cars_to_insert.append(car)
                                     car_ids_in_database.add(car_id)
                                     car_ids_in_upsert.add(car_id)
+
+                        # If this km range hit the page limit, optionally split in-memory and queue save
+                        if reached_limit and AUTO_ADJUST_ON_LIMIT:
+                            try:
+                                with ranges_lock:
+                                    key = (float(kf), float(kt))
+                                    if key not in splits_to_apply:
+                                        changed = split_and_insert_midpoint(km_list, kf, kt)
+                                        if changed:
+                                            km_ranges = np.array(km_list)
+                                            splits_to_apply.add(key)
+                                            logging.info(f"Auto-split km range {kf}-{kt} applied in-memory (queued save).")
+                            except Exception as e:
+                                logging.error(f"Failed to auto-adjust ranges: {e}")
                     except Exception as e:
                         logging.error(f"Thread error: {e}")
 
@@ -653,7 +787,7 @@ def scrape_cars(table_name):
         else:
             # Sequential fallback
             for i in range(len(km_ranges) - 1):
-                km_cars, _ = scrape_km_range(
+                km_cars, _, reached_limit, pf, pt, kf, kt = scrape_km_range(
                     base_url, params, price_from, price_to,
                     km_ranges[i], km_ranges[i + 1],
                     car_ids_in_database, car_ids_in_upsert
@@ -664,6 +798,19 @@ def scrape_cars(table_name):
                         cars_to_insert.append(car)
                         car_ids_in_database.add(car_id)
                         car_ids_in_upsert.add(car_id)
+
+                if reached_limit and AUTO_ADJUST_ON_LIMIT:
+                    try:
+                        with ranges_lock:
+                            key = (float(kf), float(kt))
+                            if key not in splits_to_apply:
+                                changed = split_and_insert_midpoint(km_list, kf, kt)
+                                if changed:
+                                    km_ranges = np.array(km_list)
+                                    splits_to_apply.add(key)
+                                    logging.info(f"Auto-split km range {kf}-{kt} applied in-memory (queued save).")
+                    except Exception as e:
+                        logging.error(f"Failed to auto-adjust ranges: {e}")
 
             with ids_lock:
                 if len(cars_to_insert) >= BATCH_SIZE:
@@ -680,6 +827,14 @@ def scrape_cars(table_name):
             logging.info(f"Final batch inserted ({len(cars_to_insert)} cars)")
 
     logging.info(f"Total cars added: {count_added}")
+    # Persist any queued range splits once at the end to avoid file write conflicts
+    if AUTO_ADJUST_ON_LIMIT and splits_to_apply:
+        try:
+            save_ranges_to_file(price_list, km_list, ranges_file, settings=ranges_settings)
+            logging.info(f"Saved {len(splits_to_apply)} auto-adjusted ranges to {ranges_file}.")
+        except Exception as e:
+            logging.error(f"Failed to save adjusted ranges file at end of run: {e}")
+
     return count_added
 
 
