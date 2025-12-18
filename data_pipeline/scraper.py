@@ -863,6 +863,7 @@ if __name__ == '__main__':
     pr = cProfile.Profile()
     pr.enable()
     try:
+        time.sleep(np.random.uniform(0, 100))
         main()
     except Exception as e:
         logging.exception("Script crashed")
