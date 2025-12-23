@@ -114,6 +114,8 @@ Located in `pbi_dashboards/main_dashboard.pbix`.
 ### **Python Packages**
 Install dependencies:
 ```bash
+python3 -m venv venv
+source venv/bin/activate
 pip install -r requirements.txt
 ```
 
