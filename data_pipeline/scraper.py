@@ -527,6 +527,11 @@ def split_and_insert_midpoint(ranges_list: list, start: float, end: float):
     return False
 
 
+def is_integer_midpoint(start: float, end: float) -> bool:
+    midpoint = (float(start) + float(end)) / 2.0
+    return float(midpoint).is_integer()
+
+
 # -------------------------
 # PAGE PROCESSING FUNCTION
 # -------------------------
@@ -765,13 +770,24 @@ def scrape_cars(table_name):
                         if reached_limit and AUTO_ADJUST_ON_LIMIT:
                             try:
                                 with ranges_lock:
-                                    key = (float(kf), float(kt))
+                                    key = ("km", float(kf), float(kt))
                                     if key not in splits_to_apply:
-                                        changed = split_and_insert_midpoint(km_list, kf, kt)
-                                        if changed:
-                                            km_ranges = np.array(km_list)
-                                            splits_to_apply.add(key)
-                                            logging.info(f"Auto-split km range {kf}-{kt} applied in-memory (queued save).")
+                                        if is_integer_midpoint(kf, kt):
+                                            changed = split_and_insert_midpoint(km_list, kf, kt)
+                                            if changed:
+                                                km_ranges = np.array(km_list)
+                                                splits_to_apply.add(key)
+                                                logging.info(f"Auto-split km range {kf}-{kt} applied in-memory (queued save).")
+                                        else:
+                                            price_key = ("price", float(pf), float(pt))
+                                            if price_key not in splits_to_apply:
+                                                changed = split_and_insert_midpoint(price_list, pf, pt)
+                                                if changed:
+                                                    price_ranges = np.array(price_list)
+                                                    splits_to_apply.add(price_key)
+                                                    logging.info(
+                                                        f"Auto-split price range {pf}-{pt} applied in-memory (km midpoint not integer)."
+                                                    )
                             except Exception as e:
                                 logging.error(f"Failed to auto-adjust ranges: {e}")
                     except Exception as e:
@@ -802,13 +818,24 @@ def scrape_cars(table_name):
                 if reached_limit and AUTO_ADJUST_ON_LIMIT:
                     try:
                         with ranges_lock:
-                            key = (float(kf), float(kt))
+                            key = ("km", float(kf), float(kt))
                             if key not in splits_to_apply:
-                                changed = split_and_insert_midpoint(km_list, kf, kt)
-                                if changed:
-                                    km_ranges = np.array(km_list)
-                                    splits_to_apply.add(key)
-                                    logging.info(f"Auto-split km range {kf}-{kt} applied in-memory (queued save).")
+                                if is_integer_midpoint(kf, kt):
+                                    changed = split_and_insert_midpoint(km_list, kf, kt)
+                                    if changed:
+                                        km_ranges = np.array(km_list)
+                                        splits_to_apply.add(key)
+                                        logging.info(f"Auto-split km range {kf}-{kt} applied in-memory (queued save).")
+                                else:
+                                    price_key = ("price", float(pf), float(pt))
+                                    if price_key not in splits_to_apply:
+                                        changed = split_and_insert_midpoint(price_list, pf, pt)
+                                        if changed:
+                                            price_ranges = np.array(price_list)
+                                            splits_to_apply.add(price_key)
+                                            logging.info(
+                                                f"Auto-split price range {pf}-{pt} applied in-memory (km midpoint not integer)."
+                                            )
                     except Exception as e:
                         logging.error(f"Failed to auto-adjust ranges: {e}")
 
