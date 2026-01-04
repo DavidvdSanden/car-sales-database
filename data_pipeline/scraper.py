@@ -1295,6 +1295,14 @@ def scrape_cars(table_name):
 def main():
     setup_logging()
     logging.info("Script started.")
+    backend = get_db_backend()
+    if backend == "postgres":
+        load_dotenv()
+        pg_host = os.getenv("POSTGRES_HOST", "localhost")
+        pg_db = os.getenv("POSTGRES_DB", "car_sales")
+        logging.info(f"Database backend: postgres (host={pg_host}, db={pg_db})")
+    else:
+        logging.info("Database backend: supabase")
     connect_vpn()
 
     table_name = "autoscout_car_adverts"
