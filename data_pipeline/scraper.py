@@ -354,7 +354,25 @@ def insert_batch_to_db(table_name, cars_to_insert):
             columns = list(cars_to_insert[0].keys())
             values = [[row.get(col) for col in columns] for row in cars_to_insert]
             column_list = ", ".join(columns)
-            insert_sql = f"INSERT INTO {table_name} ({column_list}) VALUES %s ON CONFLICT DO NOTHING"
+            if table_name == "postcode_info_nl" and "post_code" in columns:
+                update_cols = [c for c in columns if c != "post_code"]
+                if update_cols:
+                    set_clause = ", ".join(
+                        [f"{c}=EXCLUDED.{c}" for c in update_cols]
+                    )
+                    insert_sql = (
+                        f"INSERT INTO {table_name} ({column_list}) VALUES %s "
+                        f"ON CONFLICT (post_code) DO UPDATE SET {set_clause}"
+                    )
+                else:
+                    insert_sql = (
+                        f"INSERT INTO {table_name} ({column_list}) VALUES %s "
+                        f"ON CONFLICT (post_code) DO NOTHING"
+                    )
+            else:
+                insert_sql = (
+                    f"INSERT INTO {table_name} ({column_list}) VALUES %s ON CONFLICT DO NOTHING"
+                )
             psycopg2.extras.execute_values(cur, insert_sql, values)
         conn.commit()
     finally:
