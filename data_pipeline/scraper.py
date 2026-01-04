@@ -354,9 +354,7 @@ def insert_batch_to_db(table_name, cars_to_insert):
             columns = list(cars_to_insert[0].keys())
             values = [[row.get(col) for col in columns] for row in cars_to_insert]
             column_list = ", ".join(columns)
-            insert_sql = (
-                f"INSERT INTO {table_name} ({column_list}) VALUES %s ON CONFLICT DO NOTHING"
-            )
+            insert_sql = f"INSERT INTO {table_name} ({column_list}) VALUES %s ON CONFLICT DO NOTHING"
             psycopg2.extras.execute_values(cur, insert_sql, values)
         conn.commit()
     finally:
@@ -417,7 +415,9 @@ def fetch_all_rows_in_batches(
 
                 # Optional: stop early if max_batches is set
                 if max_batches and batch_count >= max_batches:
-                    logging.info(f"Reached max_batches ({max_batches}), stopping early.")
+                    logging.info(
+                        f"Reached max_batches ({max_batches}), stopping early."
+                    )
                     break
 
             except Exception as e:
@@ -463,7 +463,9 @@ def fetch_all_rows_in_batches(
                     logging.info(f"Fetched {len(data)} rows (total {len(all_rows)}).")
 
                     if max_batches and batch_count >= max_batches:
-                        logging.info(f"Reached max_batches ({max_batches}), stopping early.")
+                        logging.info(
+                            f"Reached max_batches ({max_batches}), stopping early."
+                        )
                         break
                 except Exception as e:
                     logging.error(f"Error fetching batch starting at {offset}: {e}")
@@ -479,7 +481,7 @@ def remove_duplicates(table_name, chunk_size=1000, max_removals=MAX_DUPLICATES_R
     """Remove duplicate car_id entries from database."""
     logging.info(f"Removing duplicates from database.")
     response = fetch_all_rows_in_batches(
-        table_name, "car_id", "id, car_id, make, listing_price", batch_size=1000
+        table_name, "car_id", "car_id, make, listing_price", batch_size=1000
     )
     df_full = pd.DataFrame(response)
     car_id_to_remove = df_full.loc[
