@@ -269,24 +269,98 @@ def get_supabase_client():
     return create_client(supabase_url, supabase_key)
 
 
+def get_db_backend():
+    """Return the active DB backend name."""
+    load_dotenv()
+    return os.getenv("DB_BACKEND", "postgres").strip().lower()
+
+
+def get_postgres_conn():
+    """Create and return a Postgres connection from .env."""
+    try:
+        import psycopg2
+    except ImportError as exc:
+        raise ImportError(
+            "psycopg2 is required for Postgres backend. Install with: pip install psycopg2-binary"
+        ) from exc
+
+    load_dotenv()
+    host = os.getenv("POSTGRES_HOST", "localhost")
+    port = int(os.getenv("POSTGRES_PORT", "5432"))
+    dbname = os.getenv("POSTGRES_DB", "car_sales")
+    user = os.getenv("POSTGRES_USER")
+    password = os.getenv("POSTGRES_PASSWORD")
+    sslmode = os.getenv("POSTGRES_SSLMODE")
+
+    if not user or not password:
+        raise ValueError("POSTGRES_USER and POSTGRES_PASSWORD must be set.")
+
+    conn_kwargs = {
+        "host": host,
+        "port": port,
+        "dbname": dbname,
+        "user": user,
+        "password": password,
+    }
+    if sslmode:
+        conn_kwargs["sslmode"] = sslmode
+
+    return psycopg2.connect(**conn_kwargs)
+
+
 def fetch_existing_car_ids(table_name):
-    """Fetch existing car IDs from Supabase."""
-    supabase = get_supabase_client()
+    """Fetch existing car IDs from the active database."""
+    backend = get_db_backend()
     logging.info("Fetching existing car IDs from database...")
-    response = supabase.table(table_name).select("car_id").execute()
-    car_ids = {d["car_id"] for d in response.data}
+    if backend == "supabase":
+        supabase = get_supabase_client()
+        response = supabase.table(table_name).select("car_id").execute()
+        car_ids = {d["car_id"] for d in response.data}
+    else:
+        conn = get_postgres_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(f"SELECT car_id FROM {table_name}")
+                car_ids = {row[0] for row in cur.fetchall()}
+        finally:
+            conn.close()
     logging.info(f"Found {len(car_ids)} existing car IDs.")
     return car_ids
 
 
 def insert_batch_to_db(table_name, cars_to_insert):
-    """Insert a batch of cars into Supabase."""
-    supabase = get_supabase_client()
-    if cars_to_insert:
-        logging.info(f"Inserting {len(cars_to_insert)} cars into database...")
+    """Insert a batch of rows into the active database."""
+    backend = get_db_backend()
+    if not cars_to_insert:
+        return
+    logging.info(f"Inserting {len(cars_to_insert)} cars into database...")
+    if backend == "supabase":
+        supabase = get_supabase_client()
         supabase.table(table_name).upsert(
             cars_to_insert, ignore_duplicates=True
         ).execute()
+        return
+
+    try:
+        import psycopg2.extras
+    except ImportError as exc:
+        raise ImportError(
+            "psycopg2 is required for Postgres backend. Install with: pip install psycopg2-binary"
+        ) from exc
+
+    conn = get_postgres_conn()
+    try:
+        with conn.cursor() as cur:
+            columns = list(cars_to_insert[0].keys())
+            values = [[row.get(col) for col in columns] for row in cars_to_insert]
+            column_list = ", ".join(columns)
+            insert_sql = (
+                f"INSERT INTO {table_name} ({column_list}) VALUES %s ON CONFLICT DO NOTHING"
+            )
+            psycopg2.extras.execute_values(cur, insert_sql, values)
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def fetch_all_rows_in_batches(
@@ -297,7 +371,7 @@ def fetch_all_rows_in_batches(
     max_batches: int | None = None,
 ):
     """
-    Fetch all rows from a Supabase table in batches to avoid timeouts.
+    Fetch all rows from the active database in batches to avoid timeouts.
 
     Args:
         table_name: Name of the table to query
@@ -309,46 +383,94 @@ def fetch_all_rows_in_batches(
     Returns:
         List of dicts containing all rows fetched.
     """
-    supabase = get_supabase_client()
+    backend = get_db_backend()
     all_rows = []
     offset = 0
     batch_count = 0
     last_key = None
 
-    while True:
-        try:
+    if backend == "supabase":
+        supabase = get_supabase_client()
+        while True:
+            try:
+                query = (
+                    supabase.table(table_name)
+                    .select(columns)
+                    .order(key_column, desc=False)
+                    .limit(batch_size)
+                )
+                if last_key is not None:
+                    query = query.gt(key_column, last_key)
 
-            query = (
-                supabase.table(table_name)
-                .select(columns)
-                .order(key_column, desc=False)
-                .limit(batch_size)
-            )
-            if last_key is not None:
-                query = query.gt(key_column, last_key)
+                response = query.execute()
+                data = response.data
 
-            response = query.execute()
-            data = response.data
+                if not data:
+                    break
 
-            if not data:
+                all_rows.extend(data)
+                last_key = data[-1][key_column]  # last key fetched
+
+                offset += batch_size
+                batch_count += 1
+                logging.info(f"Fetched {len(data)} rows (total {len(all_rows)}).")
+
+                # Optional: stop early if max_batches is set
+                if max_batches and batch_count >= max_batches:
+                    logging.info(f"Reached max_batches ({max_batches}), stopping early.")
+                    break
+
+            except Exception as e:
+                logging.error(f"Error fetching batch starting at {offset}: {e}")
+                time.sleep(2)
                 break
+        return all_rows
 
-            all_rows.extend(data)
-            last_key = data[-1][key_column]  # last key fetched
+    try:
+        import psycopg2.extras
+    except ImportError as exc:
+        raise ImportError(
+            "psycopg2 is required for Postgres backend. Install with: pip install psycopg2-binary"
+        ) from exc
 
-            offset += batch_size
-            batch_count += 1
-            logging.info(f"Fetched {len(data)} rows (total {len(all_rows)}).")
+    conn = get_postgres_conn()
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            while True:
+                try:
+                    if last_key is None:
+                        query = (
+                            f"SELECT {columns} FROM {table_name} "
+                            f"ORDER BY {key_column} ASC LIMIT %s"
+                        )
+                        cur.execute(query, (batch_size,))
+                    else:
+                        query = (
+                            f"SELECT {columns} FROM {table_name} "
+                            f"WHERE {key_column} > %s ORDER BY {key_column} ASC LIMIT %s"
+                        )
+                        cur.execute(query, (last_key, batch_size))
 
-            # Optional: stop early if max_batches is set
-            if max_batches and batch_count >= max_batches:
-                logging.info(f"Reached max_batches ({max_batches}), stopping early.")
-                break
+                    data = cur.fetchall()
+                    if not data:
+                        break
 
-        except Exception as e:
-            logging.error(f"Error fetching batch starting at {offset}: {e}")
-            time.sleep(2)
-            break
+                    all_rows.extend(data)
+                    last_key = data[-1][key_column]  # last key fetched
+
+                    offset += batch_size
+                    batch_count += 1
+                    logging.info(f"Fetched {len(data)} rows (total {len(all_rows)}).")
+
+                    if max_batches and batch_count >= max_batches:
+                        logging.info(f"Reached max_batches ({max_batches}), stopping early.")
+                        break
+                except Exception as e:
+                    logging.error(f"Error fetching batch starting at {offset}: {e}")
+                    time.sleep(2)
+                    break
+    finally:
+        conn.close()
 
     return all_rows
 
@@ -371,7 +493,7 @@ def remove_duplicates(table_name, chunk_size=1000, max_removals=MAX_DUPLICATES_R
         logging.info("No duplicates found in database.")
         return
 
-    supabase = get_supabase_client()
+    backend = get_db_backend()
     logging.info(f"Removing {len(car_id_to_remove)} duplicate entries in database.")
     if len(car_id_to_remove) > max_removals:
         logging.warning(
@@ -379,14 +501,25 @@ def remove_duplicates(table_name, chunk_size=1000, max_removals=MAX_DUPLICATES_R
         )
     for i in range(0, min(max_removals, len(car_id_to_remove)), chunk_size):
         chunk = car_id_to_remove[i : min(i + chunk_size, len(car_id_to_remove))]
-        supabase.table(table_name).delete().in_("car_id", chunk).execute()
+        if backend == "supabase":
+            supabase = get_supabase_client()
+            supabase.table(table_name).delete().in_("car_id", chunk).execute()
+        else:
+            conn = get_postgres_conn()
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        f"DELETE FROM {table_name} WHERE car_id = ANY(%s)", (chunk,)
+                    )
+                conn.commit()
+            finally:
+                conn.close()
 
 
 def fetch_and_insert_postcodes():
     """Fetch missing postcode info from openpostcode.nl API and insert into database."""
     car_adverts_table = "autoscout_car_adverts"
     postcodes_table = "postcode_info_nl"
-    supabase = get_supabase_client()
     global _total_429_global
 
     logging.info("Starting postcode enrichment job...")
@@ -488,7 +621,7 @@ def fetch_and_insert_postcodes():
             logging.info(
                 f"Inserting {len(postcodes_to_insert)} postcodes to the database..."
             )
-            supabase.table(postcodes_table).upsert(postcodes_to_insert).execute()
+            insert_batch_to_db(postcodes_table, postcodes_to_insert)
             count_added += len(postcodes_to_insert)
             postcodes_to_insert = []
 
@@ -496,7 +629,7 @@ def fetch_and_insert_postcodes():
         logging.info(
             f"Inserting final {len(postcodes_to_insert)} postcodes to the database..."
         )
-        supabase.table(postcodes_table).upsert(postcodes_to_insert).execute()
+        insert_batch_to_db(postcodes_table, postcodes_to_insert)
         count_added += len(postcodes_to_insert)
 
     logging.info(f"Postcode enrichment completed. Total inserted: {count_added}")
