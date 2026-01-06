@@ -499,7 +499,7 @@ def remove_duplicates(table_name, chunk_size=1000, max_removals=MAX_DUPLICATES_R
     """Remove duplicate car_id entries from database."""
     logging.info(f"Removing duplicates from database.")
     response = fetch_all_rows_in_batches(
-        table_name, "car_id", "car_id, make, listing_price", batch_size=1000
+        table_name, "car_id", "car_id, make, listing_price", batch_size=50000
     )
     df_full = pd.DataFrame(response)
     car_id_to_remove = df_full.loc[
@@ -546,12 +546,12 @@ def fetch_and_insert_postcodes():
 
     # --- Fetch existing postcodes ---
     response = fetch_all_rows_in_batches(
-        car_adverts_table, "car_id", "car_id, post_code", batch_size=1000
+        car_adverts_table, "car_id", "car_id, post_code", batch_size=50000
     )
     df_full = pd.DataFrame(response).dropna(subset=["post_code"])
     postcodes_in_car_database = set(df_full["post_code"])
     response = fetch_all_rows_in_batches(
-        postcodes_table, "post_code", "post_code, latitude", batch_size=1000
+        postcodes_table, "post_code", "post_code, latitude", batch_size=20000
     )
     df_full = pd.DataFrame(response).dropna(subset=["latitude"])
     postcodes_in_database = set(df_full["post_code"])
