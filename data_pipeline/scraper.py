@@ -126,7 +126,7 @@ sys.excepthook = _sys_excepthook
 # -------------------------
 # UTILITY FUNCTIONS
 # -------------------------
-def fetch_page(url, params, timeout=30, session=None):
+def fetch_page(url, params, timeout=30, session=None, allowed_statuses=None):
     """Fetch a URL with retries and return response.text or None on failure."""
 
     global _429_count, _total_request_attempts, _total_429_global
@@ -147,6 +147,8 @@ def fetch_page(url, params, timeout=30, session=None):
                     f"Exceeded MAX_TOTAL_429 ({MAX_TOTAL_429}). Stopping script immediately."
                 )
                 sys.exit("Too many 429 errors — stopping script.")
+        if allowed_statuses and response.status_code in allowed_statuses:
+            return response.text
         response.raise_for_status()
         return response.text
     except requests.exceptions.ReadTimeout:
@@ -187,7 +189,9 @@ def adjust_rate_limit_if_needed():
         _total_request_attempts = 0
 
 
-def rate_limited_fetch_page(url, params, max_retries=3, timeout=30):
+def rate_limited_fetch_page(
+    url, params, max_retries=3, timeout=30, allowed_statuses=None
+):
     """Wrapper for fetch_page that enforces a global rate limit and random delay."""
     global _last_request_time, _request_count, _start_window
 
@@ -205,7 +209,12 @@ def rate_limited_fetch_page(url, params, max_retries=3, timeout=30):
             _last_request_time = monotonic()
 
     # --- Fetch the page ---
-    result = fetch_page(url, params, timeout=timeout)
+    result = fetch_page(
+        url,
+        params,
+        timeout=timeout,
+        allowed_statuses=allowed_statuses,
+    )
     adjust_rate_limit_if_needed()
 
     # --- Log actual requests/sec every 10 requests ---
@@ -357,9 +366,7 @@ def insert_batch_to_db(table_name, cars_to_insert):
             if table_name == "postcode_info_nl" and "post_code" in columns:
                 update_cols = [c for c in columns if c != "post_code"]
                 if update_cols:
-                    set_clause = ", ".join(
-                        [f"{c}=EXCLUDED.{c}" for c in update_cols]
-                    )
+                    set_clause = ", ".join([f"{c}=EXCLUDED.{c}" for c in update_cols])
                     insert_sql = (
                         f"INSERT INTO {table_name} ({column_list}) VALUES %s "
                         f"ON CONFLICT (post_code) DO UPDATE SET {set_clause}"
@@ -370,9 +377,7 @@ def insert_batch_to_db(table_name, cars_to_insert):
                         f"ON CONFLICT (post_code) DO NOTHING"
                     )
             else:
-                insert_sql = (
-                    f"INSERT INTO {table_name} ({column_list}) VALUES %s ON CONFLICT DO NOTHING"
-                )
+                insert_sql = f"INSERT INTO {table_name} ({column_list}) VALUES %s ON CONFLICT DO NOTHING"
             psycopg2.extras.execute_values(cur, insert_sql, values)
         conn.commit()
     finally:
@@ -563,6 +568,21 @@ def fetch_and_insert_postcodes():
     total_to_process = len(postcodes_not_in_database)
     logging.info(f"Found {total_to_process} new postcodes to process.")
 
+    def fetch_postcode_payload(params):
+        raw = rate_limited_fetch_page(
+            BASE_URL_POST_CODE_API,
+            params=params,
+            timeout=30,
+            allowed_statuses={404},
+        )
+        if raw is None:
+            return None
+        try:
+            return json.loads(raw)
+        except json.JSONDecodeError:
+            logging.info(f"Invalid JSON payload for params {params}")
+            return None
+
     for idx, code in enumerate(postcodes_not_in_database):
         if code in postcodes_in_database or not code:
             continue
@@ -574,56 +594,48 @@ def fetch_and_insert_postcodes():
 
         params = {"postcode": code, "huisnummer": 1}
 
-        response = requests.get(BASE_URL_POST_CODE_API, params=params)
-        if response.status_code == 500:
-            logging.info(f"Response code 500 received for post code: {code}")
+        payload = fetch_postcode_payload(params)
+        if payload is None:
             continue
-        elif response.status_code == 429:
-            logging.info(f"Response code 429 received for post code: {code}")
-            continue
-        elif all(k in response.json() for k in ("latitude", "longitude")):
-            lat = response.json()["latitude"]
-            lon = response.json()["longitude"]
-            straat = response.json()["straat"]
-            buurt = response.json()["buurt"]
-            wijk = response.json()["wijk"]
-            woonplaats = response.json()["woonplaats"]
-            gemeente = response.json()["gemeente"]
-            provincie = response.json()["provincie"]
-            huisnummer = response.json()["huisnummer"]
 
-        elif response.json()["error"] == "Huisnummer not found":
-            suggestions = response.json().get("suggestions", [])
+        resolved_payload = None
+        if all(k in payload for k in ("latitude", "longitude")):
+            resolved_payload = payload
+        elif payload.get("error") == "Huisnummer not found":
+            suggestions = payload.get("suggestions", [])
             if not suggestions:
+                logging.info(
+                    f"No huisnummer suggestions returned for post code: {code}. Skipping."
+                )
                 continue
-            params = {"postcode": code, "huisnummer": suggestions[0]}
-            response = requests.get(BASE_URL_POST_CODE_API, params=params)
-            if response.status_code == 500:
-                logging.info(f"Response code 500 received for post code: {code}")
+
+            for suggestion in suggestions[:10]:
+                retry_params = {"postcode": code, "huisnummer": str(suggestion)}
+                retry_payload = fetch_postcode_payload(retry_params)
+                if retry_payload is None:
+                    continue
+                if all(k in retry_payload for k in ("latitude", "longitude")):
+                    resolved_payload = retry_payload
+                    break
+
+            if resolved_payload is None:
+                logging.info(
+                    f"Could not resolve postcode {code} using {len(suggestions)} suggestions."
+                )
                 continue
-            elif response.status_code == 429:
-                logging.info(f"Response code 429 received for post code: {code}")
-                continue
-            else:
-                lat = response.json()["latitude"]
-                lon = response.json()["longitude"]
-                straat = response.json()["straat"]
-                buurt = response.json()["buurt"]
-                wijk = response.json()["wijk"]
-                woonplaats = response.json()["woonplaats"]
-                gemeente = response.json()["gemeente"]
-                provincie = response.json()["provincie"]
-                huisnummer = response.json()["huisnummer"]
         else:
-            lat = None
-            lon = None
-            straat = None
-            buurt = None
-            wijk = None
-            woonplaats = None
-            gemeente = None
-            provincie = None
-            huisnummer = None
+            logging.info(f"Unexpected API response for post code {code}: {payload}")
+            continue
+
+        lat = resolved_payload.get("latitude")
+        lon = resolved_payload.get("longitude")
+        straat = resolved_payload.get("straat")
+        buurt = resolved_payload.get("buurt")
+        wijk = resolved_payload.get("wijk")
+        woonplaats = resolved_payload.get("woonplaats")
+        gemeente = resolved_payload.get("gemeente")
+        provincie = resolved_payload.get("provincie")
+        huisnummer = resolved_payload.get("huisnummer")
 
         postcode_info = {
             "post_code": code,
@@ -1346,8 +1358,9 @@ if __name__ == "__main__":
     pr = cProfile.Profile()
     pr.enable()
     try:
-        time.sleep(np.random.uniform(0, 100))
         main()
+    except KeyboardInterrupt:
+        logging.warning("Script interrupted by user.")
     except Exception as e:
         logging.exception("Script crashed")
         raise
