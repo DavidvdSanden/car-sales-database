@@ -593,7 +593,10 @@ def fetch_and_insert_postcodes():
             huisnummer = response.json()["huisnummer"]
 
         elif response.json()["error"] == "Huisnummer not found":
-            params = {"postcode": code, "huisnummer": response.json()["suggestions"][0]}
+            suggestions = response.json().get("suggestions", [])
+            if not suggestions:
+                continue
+            params = {"postcode": code, "huisnummer": suggestions[0]}
             response = requests.get(BASE_URL_POST_CODE_API, params=params)
             if response.status_code == 500:
                 logging.info(f"Response code 500 received for post code: {code}")
