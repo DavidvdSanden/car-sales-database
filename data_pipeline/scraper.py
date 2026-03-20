@@ -342,7 +342,8 @@ def insert_batch_to_db(table_name, cars_to_insert):
     backend = get_db_backend()
     if not cars_to_insert:
         return
-    logging.info(f"Inserting {len(cars_to_insert)} cars into database...")
+    entity_label = "postcodes" if table_name == "postcode_info_nl" else "cars"
+    logging.info(f"Inserting {len(cars_to_insert)} {entity_label} into database...")
     if backend == "supabase":
         supabase = get_supabase_client()
         supabase.table(table_name).upsert(
