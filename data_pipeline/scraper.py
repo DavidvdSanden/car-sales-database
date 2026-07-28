@@ -54,6 +54,7 @@ THROTTLE_REDUCTION_FACTOR = 0.8  # reduce RPS by 20%
 THROTTLE_MIN_RPS = 1.0  # min 1 request/sec
 THROTTLE_DELAY_INCREASE = 1.5  # increase delay range by 50%
 MAX_TOTAL_429 = 50  # stop script after this many 429s total
+MAX_CONSECUTIVE_POSTCODE_FAILURES = 5  # abort postcode job after this many back-to-back connection failures
 
 # -------------------------
 # NETWORK HELPERS
@@ -569,7 +570,11 @@ def fetch_and_insert_postcodes():
     total_to_process = len(postcodes_not_in_database)
     logging.info(f"Found {total_to_process} new postcodes to process.")
 
+    consecutive_connection_failures = 0
+    postcode_api_unreachable = False
+
     def fetch_postcode_payload(params):
+        nonlocal consecutive_connection_failures, postcode_api_unreachable
         raw = rate_limited_fetch_page(
             BASE_URL_POST_CODE_API,
             params=params,
@@ -577,7 +582,16 @@ def fetch_and_insert_postcodes():
             allowed_statuses={404},
         )
         if raw is None:
+            consecutive_connection_failures += 1
+            if consecutive_connection_failures >= MAX_CONSECUTIVE_POSTCODE_FAILURES:
+                postcode_api_unreachable = True
+                logging.critical(
+                    f"{consecutive_connection_failures} consecutive connection failures "
+                    f"to {BASE_URL_POST_CODE_API}. Postcode API appears unreachable; "
+                    "aborting postcode enrichment for this run."
+                )
             return None
+        consecutive_connection_failures = 0
         try:
             return json.loads(raw)
         except json.JSONDecodeError:
@@ -587,6 +601,8 @@ def fetch_and_insert_postcodes():
     for idx, code in enumerate(postcodes_not_in_database):
         if code in postcodes_in_database or not code:
             continue
+        if postcode_api_unreachable:
+            break
         if _total_429_global >= MAX_TOTAL_429:
             logging.critical(
                 "Max 429 limit reached during postcode processing. Stopping."
@@ -611,6 +627,8 @@ def fetch_and_insert_postcodes():
                 continue
 
             for suggestion in suggestions[:10]:
+                if postcode_api_unreachable:
+                    break
                 retry_params = {"postcode": code, "huisnummer": str(suggestion)}
                 retry_payload = fetch_postcode_payload(retry_params)
                 if retry_payload is None:
