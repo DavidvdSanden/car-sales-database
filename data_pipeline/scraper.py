@@ -782,6 +782,18 @@ def process_page(base_url, params, car_ids_in_database, car_ids_in_upsert):
     if not car_listings:
         return -1
 
+    # Listing data is also embedded as structured JSON (Next.js hydration payload),
+    # which survives markup/CSS-class redesigns better than scraping the rendered pills.
+    listings_by_id = {}
+    next_data_tag = soup.find("script", id="__NEXT_DATA__")
+    if next_data_tag and next_data_tag.string:
+        try:
+            next_data = json.loads(next_data_tag.string)
+            for listing in next_data["props"]["pageProps"]["listings"]:
+                listings_by_id[listing["id"]] = listing
+        except (json.JSONDecodeError, KeyError, TypeError) as e:
+            logging.warning(f"Failed to parse __NEXT_DATA__ payload: {e}")
+
     results = []
     for car in car_listings:
         car_id = car.get("id")
@@ -809,18 +821,28 @@ def process_page(base_url, params, car_ids_in_database, car_ids_in_upsert):
             except:
                 postcode = None
 
-            # Transmission, fuel, power
-            transmission = car.find(
-                "span", {"data-testid": "VehicleDetails-transmission"}
-            )
-            fuel = car.find("span", {"data-testid": "VehicleDetails-gas_pump"})
-            power = car.find("span", {"data-testid": "VehicleDetails-speedometer"})
+            # Transmission, fuel, power, model, and range all come from the
+            # structured JSON payload (see listings_by_id above), which is more
+            # resilient to markup/CSS-class redesigns than the rendered pills.
+            listing_json = listings_by_id.get(car_id, {})
+            vehicle_json = listing_json.get("vehicle", {})
+            details_by_icon = {
+                d.get("iconName"): d
+                for d in listing_json.get("vehicleDetails", [])
+                if isinstance(d, dict)
+            }
 
-            transmission_text = (
-                transmission.get_text(strip=True) if transmission else None
+            transmission_text = vehicle_json.get("transmission")
+
+            fuel_detail = details_by_icon.get("gas_pump")
+            fuel_text = fuel_detail.get("data") if fuel_detail else None
+
+            power_detail = details_by_icon.get("speedometer")
+            power_text = (
+                power_detail.get("data")
+                if power_detail and not power_detail.get("isPlaceholder")
+                else None
             )
-            fuel_text = fuel.get_text(strip=True) if fuel else None
-            power_text = power.get_text(strip=True) if power else None
 
             kw_value, pk_value = None, None
             if power_text:
@@ -830,20 +852,18 @@ def process_page(base_url, params, car_ids_in_database, car_ids_in_upsert):
                     pk_value = float(match.group(2))
 
             # Model and version
-            title_element = car.find("span", class_="ListItem_title_bold__iQJRq")
-            model_text = title_element.get_text(strip=True) if title_element else None
-            version_element = car.find("span", class_="ListItem_version__5EWfi")
-            version_text = (
-                version_element.get_text(strip=True) if version_element else None
-            )
-
-            # Actieradius / range
-            actieradius_element = car.find("span", attrs={"aria-label": "actieradius"})
-            actieradius_text = (
-                actieradius_element.get_text(strip=True)
-                if actieradius_element
+            make_text = vehicle_json.get("make")
+            model_name_text = vehicle_json.get("model")
+            model_text = (
+                f"{make_text} {model_name_text}".strip()
+                if make_text or model_name_text
                 else None
             )
+            version_text = vehicle_json.get("modelVersionInput")
+
+            # Actieradius / range (EV listings only)
+            range_detail = details_by_icon.get("distance")
+            actieradius_text = range_detail.get("data") if range_detail else None
             ranges = (
                 [float(num) for num in re.findall(r"\d+(?:\.\d+)?", actieradius_text)]
                 if actieradius_text
